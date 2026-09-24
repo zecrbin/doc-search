@@ -38,9 +38,9 @@ RERANK_ENABLED = _env("RERANK", "1") == "1"
 # 语义检索（综合/语义模式）。默认关闭：只用精确匹配，入库不依赖 Embedding 服务
 SEMANTIC = _env("SEMANTIC", "0") == "1"
 
-# 大模型（OpenAI 兼容接口：vLLM / SGLang / LMDeploy / Ollama / llama.cpp 等），用于生成文档概述；不配置则不生成
-# 地址只写到端口时自动补 /v1，例如 http://192.168.18.61:8000 → http://192.168.18.61:8000/v1
-LLM_URL = _env("LLM_URL", "").rstrip("/")
+# 大模型（OpenAI 兼容接口：llama.cpp / vLLM / SGLang / LMDeploy / Ollama 等），用于生成文档概述；设为空字符串则不生成
+# 地址只写到端口时自动补 /v1，例如 http://192.168.18.61:8001 → http://192.168.18.61:8001/v1
+LLM_URL = _env("LLM_URL", "http://192.168.18.61:8001/v1").rstrip("/")
 LLM_MODEL = _env("LLM_MODEL", "")  # 留空则用接口 /models 返回的第一个模型
 LLM_API_KEY = _env("LLM_API_KEY", "")
 LLM_TIMEOUT = float(_env("LLM_TIMEOUT", 600))  # 单次调用超时（秒），量化模型在长文本上可能要几分钟

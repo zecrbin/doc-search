@@ -47,8 +47,11 @@ def model() -> str:
     if config.LLM_MODEL:
         return config.LLM_MODEL
     if _model is None:
-        r = _http().get("/models", timeout=10)
-        r.raise_for_status()
+        try:
+            r = _http().get("/models", timeout=10)
+            r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"连不上大模型（{base_url()}）：{e}") from e
         models = r.json().get("data") or []
         if not models:
             raise RuntimeError("大模型接口 /models 没有返回模型，请配置 DOCSEARCH_LLM_MODEL")

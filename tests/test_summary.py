@@ -206,3 +206,14 @@ def test_cli_llm_check(fake, capsys):
     assert cli.check_llm() == 0
     out = capsys.readouterr().out
     assert "qwen-test" in out and "16384" in out and "我是 Qwen。" in out and "正常" in out
+
+
+def test_unreachable_llm_gives_clear_message(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "LLM_URL", "http://127.0.0.1:1/v1")
+    monkeypatch.setattr(llm, "_client", None)
+    monkeypatch.setattr(llm, "_model", None)
+    doc = _ingest(tmp_path, ["质保期三年。"])
+    summary.Worker()._step()
+    row = _row(doc["id"])
+    assert row["summary_status"] == "failed" and "连不上大模型（http://127.0.0.1:1/v1）" in row["summary_message"]
+    monkeypatch.setattr(llm, "_client", None)
