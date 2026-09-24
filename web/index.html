@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>文档检索</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">文档检索</div>
+    <div class="health" id="health" title="服务状态"></div>
+    <button class="btn" id="openLibrary">文档库 <span id="docCount" class="count"></span></button>
+  </header>
+
+  <main class="layout">
+    <aside class="search-pane">
+      <form id="searchForm" class="search-box">
+        <input id="q" type="search" placeholder="输入关键字或问题，如：项目编号、付款方式、质保期" autocomplete="off" autofocus>
+        <button class="btn primary" type="submit">检索</button>
+      </form>
+      <div class="filters">
+        <div class="seg" id="mode" role="radiogroup">
+          <button type="button" data-mode="hybrid" class="on" title="关键字 + 语义融合">综合</button>
+          <button type="button" data-mode="keyword" title="原文逐字包含查询词（空格分隔多个词）">精确</button>
+          <button type="button" data-mode="semantic" title="只按语义相似度">语义</button>
+        </div>
+        <select id="docFilter"><option value="">全部文档</option></select>
+      </div>
+      <div class="meta" id="meta"></div>
+      <ol class="results" id="results"></ol>
+    </aside>
+
+    <section class="viewer-pane">
+      <div class="viewer-bar" id="viewerBar" hidden>
+        <span class="viewer-title" id="viewerTitle"></span>
+        <span class="viewer-page" id="viewerPage"></span>
+        <a class="btn small" id="downloadOrig" href="#" download>下载原文</a>
+      </div>
+      <div class="pages" id="pages">
+        <div class="empty" id="viewerEmpty">
+          <p>点击左侧检索结果，在这里查看原文并定位高亮</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="library">
+    <div class="lib-head">
+      <h2>文档库</h2>
+      <button class="btn small" id="closeLibrary">关闭</button>
+    </div>
+    <label class="dropzone" id="dropzone">
+      <input type="file" id="fileInput" multiple accept=".pdf,.doc,.docx,.rtf" hidden>
+      <strong>点击选择文件或拖拽到这里</strong>
+      <span>支持 PDF、Word（doc/docx）、RTF，可多选；扫描件会自动 OCR</span>
+    </label>
+    <div class="lib-table-wrap">
+      <table class="lib-table">
+        <thead><tr><th>文件名</th><th>页数</th><th>片段</th><th>状态</th><th>入库时间</th><th></th></tr></thead>
+        <tbody id="docRows"></tbody>
+      </table>
+    </div>
+  </dialog>
+
+  <div class="drop-overlay" id="dropOverlay">松开即可上传</div>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

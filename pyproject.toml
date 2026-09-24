@@ -1,0 +1,18 @@
+[project]
+name = "doc-search"
+version = "0.1.0"
+description = "PDF/Word 文档混合检索与原文溯源"
+authors = [
+    { name = "zhishubin", email = "zzabcroot@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "jieba>=0.42.1",
+    "pymupdf>=1.28.2",
+    "python-multipart>=0.0.32",
+    "pywin32>=312 ; sys_platform == 'win32'",
+    "sqlite-vec>=0.1.9",
+    "uvicorn[standard]>=0.53.0",
+]

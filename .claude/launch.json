@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "doc-search",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "python", "-m", "app.main"],
+      "port": 18090
+    }
+  ]
+}
