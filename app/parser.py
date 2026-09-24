@@ -5,6 +5,7 @@
 import json
 import logging
 import re
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -44,6 +45,9 @@ class _Raw:
     page_height: float = field(default=0, repr=False)
 
 
+_OCR_PAGE_COST = 30  # 一页 OCR 相当于本地提取多少页的耗时（只用于分配进度）
+
+
 def parse_pdf(pdf_path, progress: Progress) -> tuple[list[Block], int, int, OcrLines]:
     """返回 (blocks, 页数, OCR 页数, OCR 文字行)。"""
     doc = pymupdf.open(pdf_path)
@@ -57,16 +61,21 @@ def parse_pdf(pdf_path, progress: Progress) -> tuple[list[Block], int, int, OcrL
 
         raws: list[_Raw] = []
         local_pages = [i for i in range(n) if i not in ocr_set]
+        # 进度按工作量分配：OCR 一页的耗时约等于本地提取几十页；全是扫描页时进度基本就是 OCR 的进度
+        w_local, w_ocr = len(local_pages), len(ocr_pages) * _OCR_PAGE_COST
+        local_share = w_local / (w_local + w_ocr) if w_local + w_ocr else 1.0
         for k, i in enumerate(local_pages):
             raws.extend(_extract_page(doc[i]))
             if k % 20 == 0:
-                progress(0.3 * k / max(1, len(local_pages)), f"提取文字 {k}/{len(local_pages)} 页")
+                progress(local_share * k / len(local_pages), f"提取文字 {k}/{len(local_pages)} 页")
         local_blocks = _classify(_drop_margins(raws, len(local_pages)))
 
         remote_blocks: list[Block] = []
         ocr_lines: OcrLines = {}
         if ocr_pages:
-            remote_blocks, ocr_lines = _mineru(doc, ocr_pages, progress, force_ocr=config.PARSE_MODE != "mineru")
+            remote_blocks, ocr_lines = _mineru(
+                doc, ocr_pages, lambda frac, msg: progress(local_share + (1 - local_share) * frac, msg),
+                force_ocr=config.PARSE_MODE != "mineru")
 
         by_page: dict[int, list[Block]] = defaultdict(list)
         for b in local_blocks + remote_blocks:
@@ -279,10 +288,16 @@ def _mineru(doc: pymupdf.Document, pages: list[int], progress: Progress,
     out: list[Block] = []
     lines: OcrLines = {}
     step = max(1, config.MINERU_BATCH_PAGES)
+    t_begin = time.monotonic()
     with httpx.Client(timeout=config.MINERU_TIMEOUT, trust_env=False) as client:  # 内网服务，不走代理
         for start in range(0, len(pages), step):
             batch = pages[start:start + step]
-            progress(0.3 + 0.7 * start / len(pages), f"OCR 识别 {start}/{len(pages)} 页（MinerU）")
+            msg = f"OCR 识别 {start}/{len(pages)} 页（MinerU）"
+            if start:  # 按已完成的批次估算速度和剩余时间，方便判断 MinerU 是否正常（GPU 被占满时会退回 CPU，慢十几倍）
+                per_page = (time.monotonic() - t_begin) / start
+                msg = f"OCR 识别 {start}/{len(pages)} 页（MinerU 约 {per_page:.1f} 秒/页，还需约 {_fmt_secs(per_page * (len(pages) - start))}）"
+            progress(start / len(pages), msg)
+            t_batch = time.monotonic()
             sub = pymupdf.open()
             for p in batch:
                 sub.insert_pdf(doc, from_page=p, to_page=p)
@@ -292,7 +307,7 @@ def _mineru(doc: pymupdf.Document, pages: list[int], progress: Progress,
                 f"{config.MINERU_URL}/file_parse",
                 files=[("files", ("part.pdf", data, "application/pdf"))],
                 data={
-                    "backend": "pipeline",
+                    "backend": config.MINERU_BACKEND,
                     "parse_method": "ocr" if force_ocr else "auto",
                     "lang_list": ["ch"],
                     "formula_enable": "false",
@@ -308,6 +323,8 @@ def _mineru(doc: pymupdf.Document, pages: list[int], progress: Progress,
             items = result["content_list"]
             if isinstance(items, str):
                 items = json.loads(items)
+            log.info("MinerU：%d 页用时 %.1fs（%.1f 秒/页）", len(batch), time.monotonic() - t_batch,
+                     (time.monotonic() - t_batch) / len(batch))
             for item in items:
                 b = _mineru_block(item, batch, doc)
                 if b:
@@ -317,6 +334,11 @@ def _mineru(doc: pymupdf.Document, pages: list[int], progress: Progress,
             except Exception as e:  # 拿不到行坐标只影响扫描件上的关键字定位（退回整段框），不影响入库
                 log.warning("MinerU 行坐标解析失败：%s", e)
     return out, lines
+
+
+def _fmt_secs(s: float) -> str:
+    s = int(s)
+    return f"{s} 秒" if s < 60 else f"{s // 60} 分钟" if s < 3600 else f"{s // 3600} 小时 {s % 3600 // 60} 分钟"
 
 
 def _iter_spans(blocks: list):

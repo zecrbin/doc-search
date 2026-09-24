@@ -1,4 +1,4 @@
-"""Word 系列文档转 PDF：Windows 优先用本机 Word（COM），否则用 LibreOffice。
+"""转 PDF：Word 系列 Windows 优先用本机 Word（COM），否则用 LibreOffice；图片用 PyMuPDF 直接转。
 
 统一转成 PDF 后，解析、页码、bbox 和前端预览都走同一套坐标。
 """
@@ -9,6 +9,10 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import pymupdf
+
+from . import config
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +28,9 @@ def to_pdf(src: Path, dst: Path):
 
 
 def _convert(src: Path, dst: Path):
+    if src.suffix.lower() in config.IMAGE_EXTS:
+        _image(src, dst)
+        return
     errors = []
     if sys.platform == "win32":
         try:
@@ -38,6 +45,16 @@ def _convert(src: Path, dst: Path):
         return
     errors.append("未找到 LibreOffice")
     raise RuntimeError("无法转换为 PDF（" + "；".join(errors) + "）")
+
+
+def _image(src: Path, dst: Path):
+    """图片 → PDF，每张图一页（多页 TIFF 每帧一页），页面大小按图片分辨率，EXIF 方向自动转正。"""
+    with pymupdf.open(src) as img:
+        data = img.convert_to_pdf()
+    with pymupdf.open("pdf", data) as pdf:
+        if not pdf.page_count:
+            raise RuntimeError("图片里没有可用的内容")
+        pdf.save(dst)
 
 
 def _word(src: Path, dst: Path):

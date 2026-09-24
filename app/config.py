@@ -24,6 +24,8 @@ MINERU_URL = _env("MINERU_URL", "http://192.168.18.61:8000").rstrip("/")
 # 每次送给 MinerU 的页数，越小进度越细，越大请求次数越少
 MINERU_BATCH_PAGES = int(_env("MINERU_BATCH_PAGES", 10))
 MINERU_TIMEOUT = float(_env("MINERU_TIMEOUT", 1800))
+# MinerU 解析后端：pipeline（默认，兼容性最好）；MinerU 部署了 VLM 加速时可改 vlm-sglang-client 等，见 MinerU 文档
+MINERU_BACKEND = _env("MINERU_BACKEND", "pipeline")
 # auto：有文字层的页本地提取，扫描页走 MinerU OCR；mineru：所有页都交给 MinerU（慢，版面更准）
 PARSE_MODE = _env("PARSE_MODE", "auto")
 
@@ -36,7 +38,20 @@ RERANK_ENABLED = _env("RERANK", "1") == "1"
 # 语义检索（综合/语义模式）。默认关闭：只用精确匹配，入库不依赖 Embedding 服务
 SEMANTIC = _env("SEMANTIC", "0") == "1"
 
+# 大模型（OpenAI 兼容接口：llama.cpp / vLLM / SGLang / LMDeploy / Ollama 等），用于生成文档概述；设为空字符串则不生成
+# 地址只写到端口时自动补 /v1，例如 http://192.168.18.61:8001 → http://192.168.18.61:8001/v1
+LLM_URL = _env("LLM_URL", "http://192.168.18.61:8001/v1").rstrip("/")
+LLM_MODEL = _env("LLM_MODEL", "")  # 留空则用接口 /models 返回的第一个模型
+LLM_API_KEY = _env("LLM_API_KEY", "")
+LLM_TIMEOUT = float(_env("LLM_TIMEOUT", 600))  # 单次调用超时（秒），量化模型在长文本上可能要几分钟
+# 每次送给大模型的原文字数。0 = 自动：按接口报告的上下文长度计算（llama.cpp 的 /props、vLLM 的 /models），取不到时用 12000
+LLM_CHUNK_CHARS = int(_env("LLM_CHUNK_CHARS", 0))
+LLM_MAX_TOKENS = int(_env("LLM_MAX_TOKENS", 2048))  # 每次最多生成多少 token
+LLM_NO_THINK = _env("LLM_NO_THINK", "1") == "1"  # Qwen3 等思考模型关闭思考，快很多
+
 CHUNK_TARGET = int(_env("CHUNK_TARGET", 500))
 CHUNK_MAX = int(_env("CHUNK_MAX", 800))
 
-ALLOWED_EXTS = {".pdf", ".doc", ".docx", ".rtf"}
+# 图片转成 PDF 后当扫描页走 OCR；多页 TIFF 转成多页，手机照片按 EXIF 方向转正（webp 不支持）
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".gif"}
+ALLOWED_EXTS = {".pdf", ".doc", ".docx", ".rtf"} | IMAGE_EXTS

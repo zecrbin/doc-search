@@ -195,6 +195,34 @@ body { margin: 0; background: var(--bg); height: 100vh; display: flex; flex-dire
 .bar { height: 5px; background: #eef0f4; border-radius: 3px; overflow: hidden; }
 .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s; }
 
+/* 文档概述 */
+.btn.small.pending { color: var(--warn); }
+dialog.summary-dlg {
+  width: min(820px, calc(100vw - 32px)); max-height: calc(100vh - 64px); border: 0; border-radius: 12px; padding: 20px;
+  box-shadow: 0 20px 60px rgba(20, 30, 50, .25); display: none; flex-direction: column; gap: 12px;
+}
+dialog.summary-dlg[open] { display: flex; }
+dialog.summary-dlg::backdrop { background: rgba(20, 30, 50, .35); }
+.sum-head { display: flex; align-items: flex-start; gap: 12px; }
+.sum-title { flex: 1; min-width: 0; }
+.sum-title h2 { margin: 0 0 2px; font-size: 17px; }
+.sum-title span { color: var(--muted); font-size: 13px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sum-status { font-size: 13px; color: var(--muted); background: #f5f6f8; border-radius: 6px; padding: 6px 10px; }
+.sum-status.bad { color: var(--bad); background: #fdf3f3; }
+.sum-prog { display: flex; align-items: center; gap: 10px; margin: 2px 0 6px; }
+.sum-prog .bar { flex: 1; height: 6px; }
+.sum-prog b { color: var(--accent); font-variant-numeric: tabular-nums; min-width: 38px; text-align: right; }
+.sum-body.drafting::after { content: "▍"; color: var(--accent); animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.sum-body { overflow-y: auto; line-height: 1.75; font-size: 14px; padding-right: 4px; }
+.sum-body:empty { display: none; }
+.sum-body h3 { font-size: 15px; margin: 14px 0 6px; padding-left: 8px; border-left: 3px solid var(--accent); }
+.sum-body h3:first-child { margin-top: 0; }
+.sum-body p { margin: 4px 0; text-indent: 2em; }
+.sum-body ul, .sum-body ol { margin: 4px 0; padding-left: 22px; }
+.sum-foot { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.sum-foot .spacer { flex: 1; }
+
 .drop-overlay {
   position: fixed; inset: 0; display: none; align-items: center; justify-content: center; font-size: 20px; color: var(--accent);
   background: rgba(233, 238, 251, .85); border: 3px dashed var(--accent); z-index: 100; pointer-events: none;

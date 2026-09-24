@@ -10,7 +10,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-from . import chunker, config, convert, db, embedder, parser, textproc
+from . import chunker, config, convert, db, embedder, llm, parser, summary, textproc
 
 log = logging.getLogger(__name__)
 
@@ -165,6 +165,10 @@ def process(doc: dict):
             " updated_at=datetime('now', 'localtime'), finished_at=datetime('now', 'localtime') WHERE id=?",
             (pages, ocr_pages, len(chunks), doc_id),
         )
+        if llm.enabled():  # 内容变了，概述重新生成（旧概述在新的生成完之前照常显示）
+            summary.queue(conn, "id=?", (doc_id,))
+    if llm.enabled():
+        summary.worker.wake.set()
 
 
 class Worker(threading.Thread):

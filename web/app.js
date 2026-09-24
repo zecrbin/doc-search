@@ -7,7 +7,7 @@ const PDF_OPTS = {
   standardFontDataUrl: "/static/vendor/pdfjs/standard_fonts/",
 };
 const TOP_K = 200;
-const ACCEPT = [".pdf", ".doc", ".docx", ".rtf"];
+const ACCEPT = [".pdf", ".doc", ".docx", ".rtf", ".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".gif"];
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -690,6 +690,15 @@ async function doUpload(files) {
 const lib = { page: 1, pageSize: 50, status: "all", q: "", data: null, selected: new Set() };
 try { lib.pageSize = +localStorage.getItem("libPageSize") || 50; } catch {}
 
+const serverNow = () => Date.now() + (lib.clockOffset || 0);
+
+// 处理中文件的"已用时间"每秒走一次（列表本身 2 秒刷新一次）
+setInterval(() => {
+  document.querySelectorAll("#docRows [data-started]").forEach((td) => {
+    td.textContent = `已用 ${fmtDur(serverNow() - parseTime(td.dataset.started))}`;
+  });
+}, 1000);
+
 let pollTimer;
 async function refreshDocs() {
   clearTimeout(pollTimer);
@@ -707,8 +716,10 @@ async function refreshDocs() {
     return refreshDocs();
   }
   lib.data = data;
+  lib.clockOffset = parseTime(data.now) - Date.now(); // 服务器时钟 - 本机时钟
   renderDocs();
-  pollTimer = setTimeout(refreshDocs, data.overall.busy ? 2000 : 15000);
+  const summarizing = data.items.some((d) => d.summary_status === "queued" || d.summary_status === "running");
+  pollTimer = setTimeout(refreshDocs, data.overall.busy ? 2000 : summarizing ? 4000 : 15000);
 }
 
 function resetList() {
@@ -740,7 +751,7 @@ function renderDocs() {
     `<button type="button" data-filter="${key}" class="${lib.status === key ? "on" : ""} ${key}">${label} <b>${counts[key]}</b></button>`,
   ).join("");
 
-  const now = Date.now();
+  const now = serverNow();
   $("#docRows").innerHTML = items.length ? items.map((d) => {
     const cls = d.status === "done" ? "done" : d.status === "failed" ? "failed" : "busy";
     let detail;
@@ -756,7 +767,8 @@ function renderDocs() {
     }
     const start = parseTime(d.started_at);
     const end = parseTime(d.finished_at);
-    const dur = start && end ? fmtDur(end - start) : start && busy(d) ? `已用 ${fmtDur(now - start)}` : "–";
+    const running = start && !end && busy(d);
+    const dur = start && end ? fmtDur(end - start) : running ? `已用 ${fmtDur(now - start)}` : "–";
     const sel = lib.selected.has(d.id);
     return `<tr class="${cls}${sel ? " selected" : ""}">
       <td class="check"><input type="checkbox" data-sel="${d.id}" ${sel ? "checked" : ""}></td>
@@ -767,8 +779,9 @@ function renderDocs() {
       <td class="detail">${detail}</td>
       <td class="time">${fmtTime(d.created_at)}</td>
       <td class="time">${fmtTime(d.finished_at)}</td>
-      <td class="num">${dur}</td>
+      <td class="num"${running ? ` data-started="${esc(d.started_at)}"` : ""}>${dur}</td>
       <td class="actions">
+        ${summaryButton(d)}
         <a class="btn small" href="/api/documents/${d.id}/file" download>下载</a>
         <button class="btn small" data-reindex="${d.id}" ${busy(d) ? "disabled" : ""}>重新解析</button>
         <button class="btn small danger" data-del="${d.id}">删除</button>
@@ -958,6 +971,150 @@ $("#reindexAll").addEventListener("click", async () => {
   refreshDocs();
 });
 
+// ------------------------------------------------------------------ 服务内容（大模型生成）
+
+let llmEnabled = false;
+const SUMMARY_LABEL = { queued: "服务内容排队中", running: "服务内容生成中", failed: "服务内容失败", done: "服务内容" };
+
+function summaryButton(d) {
+  if (d.status !== "done" || (!llmEnabled && d.summary_status !== "done")) return "";
+  const st = d.summary_status;
+  const cls = st === "failed" ? " danger" : st === "queued" || st === "running" ? " pending" : "";
+  const title = st === "failed" ? d.summary_message || "" : st === "running" ? d.summary_message || "" : "";
+  const label = st === "running" ? `服务内容 ${Math.round((d.summary_progress || 0) * 100)}%` : SUMMARY_LABEL[st] || "生成服务内容";
+  return `<button class="btn small${cls}" data-summary="${d.id}" title="${esc(title)}">${label}</button>`;
+}
+
+// 极简 Markdown：标题、列表、加粗；先转义，不会注入 HTML
+function renderMarkdown(md) {
+  const inline = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  const out = [];
+  let list = null;
+  const close = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const raw of md.split("\n")) {
+    const line = raw.trim();
+    let m;
+    if (!line) { close(); continue; }
+    if ((m = line.match(/^#{1,6}\s+(.*)$/))) { close(); out.push(`<h3>${inline(m[1])}</h3>`); continue; }
+    if ((m = line.match(/^(?:[-*•·]|\d+[.、)])\s*(.*)$/))) {
+      const tag = /^\d/.test(line) ? "ol" : "ul";
+      if (list !== tag) { close(); out.push(`<${tag}>`); list = tag; }
+      out.push(`<li>${inline(m[1])}</li>`);
+      continue;
+    }
+    close();
+    out.push(`<p>${inline(line)}</p>`);
+  }
+  close();
+  return out.join("");
+}
+
+const sumDlg = { docId: null, timer: null, text: "", offset: 0 };
+
+// 服务内容生成中的"已用时间"每秒走一次（按服务器时钟）
+setInterval(() => {
+  const el = document.querySelector("#sumStatus [data-started]");
+  if (el) el.textContent = fmtDur(Date.now() + sumDlg.offset - parseTime(el.dataset.started));
+}, 1000);
+
+async function openSummary(docId) {
+  sumDlg.docId = docId;
+  sumDlg.text = "";
+  $("#sumBody").innerHTML = "";
+  $("#sumStatus").textContent = "加载中…";
+  if (!$("#summaryDlg").open) $("#summaryDlg").showModal();
+  await loadSummary();
+}
+
+async function loadSummary() {
+  clearTimeout(sumDlg.timer);
+  const docId = sumDlg.docId;
+  let r;
+  try {
+    r = await api(`/api/documents/${docId}/summary`);
+  } catch (err) {
+    $("#sumStatus").textContent = `加载失败：${err.message}`;
+    return;
+  }
+  if (docId !== sumDlg.docId || !$("#summaryDlg").open) return;
+  sumDlg.offset = parseTime(r.now) - Date.now();
+  $("#sumFile").textContent = r.filename;
+  $("#sumFile").title = r.filename;
+  const status = $("#sumStatus");
+  status.className = "sum-status";
+  const busyNow = r.status === "queued" || r.status === "running";
+  if (!r.llm && r.status !== "done") {
+    status.textContent = "没有配置大模型（DOCSEARCH_LLM_URL），无法生成服务内容";
+  } else if (r.doc_status !== "done") {
+    status.textContent = "文件还在解析，解析完成后自动生成服务内容";
+  } else if (r.status === "queued") {
+    status.textContent = r.summary ? "文件已重新解析，正在排队重新生成（下面是上一次的结果）" : "排队中，前面的文件生成完就开始";
+  } else if (r.status === "running") {
+    const pct = Math.round((r.progress || 0) * 100);
+    const elapsed = r.started_at ? fmtDur(Date.now() + sumDlg.offset - parseTime(r.started_at)) : "";
+    status.innerHTML = `<div class="sum-prog"><div class="bar"><i style="width:${pct}%"></i></div><b>${pct}%</b></div>
+      <div>${esc(r.message || "准备中")}${r.started_at ? ` · 已用 <span data-started="${esc(r.started_at)}">${elapsed}</span>` : ""}</div>`;
+  } else if (r.status === "failed") {
+    status.className = "sum-status bad";
+    status.textContent = `生成失败：${r.message || "未知错误"}`;
+  } else if (r.status === "done") {
+    status.textContent = `生成于 ${r.summary_at}`;
+  } else {
+    status.textContent = "还没有生成服务内容，点击下方“重新生成”开始";
+  }
+  sumDlg.text = r.summary || "";
+  // 生成最后一步时，边生成边显示草稿
+  const drafting = r.status === "running" && r.draft;
+  $("#sumBody").classList.toggle("drafting", !!drafting);
+  $("#sumBody").innerHTML = drafting ? renderMarkdown(r.draft) : r.summary ? renderMarkdown(r.summary) : "";
+  if (drafting) $("#sumBody").scrollTop = $("#sumBody").scrollHeight;
+  $("#sumRegen").hidden = !r.llm || r.doc_status !== "done";
+  $("#sumRegen").disabled = busyNow;
+  $("#sumCopy").disabled = !r.summary;
+  if (busyNow || r.doc_status !== "done") sumDlg.timer = setTimeout(loadSummary, r.status === "running" ? 1500 : 3000);
+}
+
+$("#sumClose").addEventListener("click", () => $("#summaryDlg").close());
+$("#summaryDlg").addEventListener("close", () => { clearTimeout(sumDlg.timer); sumDlg.docId = null; });
+$("#sumRegen").addEventListener("click", async () => {
+  try {
+    await api("/api/documents/summarize", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: [sumDlg.docId] }),
+    });
+  } catch (err) {
+    alert(`操作失败：${err.message}`);
+  }
+  loadSummary();
+  if (!$("#viewLibrary").hidden) refreshDocs();
+});
+$("#sumCopy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(sumDlg.text);
+    $("#sumCopy").textContent = "已复制";
+  } catch {
+    // 非 https 页面没有剪贴板权限：选中文字让用户手动复制
+    getSelection().selectAllChildren($("#sumBody"));
+    $("#sumCopy").textContent = "已选中，按 Ctrl+C 复制";
+  }
+  setTimeout(() => { $("#sumCopy").textContent = "复制"; }, 2000);
+});
+$("#viewerSummary").addEventListener("click", () => viewer.docId !== null && openSummary(viewer.docId));
+$("#docRows").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-summary]");
+  if (b) openSummary(+b.dataset.summary);
+});
+$("#selSummarize").addEventListener("click", async () => {
+  const ids = [...lib.selected];
+  await withBusy($("#selSummarize"), "提交中…", async () => {
+    const r = await api("/api/documents/summarize", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }),
+    });
+    const skipped = ids.length - r.queued;
+    notice("ok", `已加入服务内容生成队列：${r.queued} 个文件${skipped ? `（${skipped} 个未解析完成或正在生成，已跳过）` : ""}`);
+    lib.selected.clear();
+  });
+});
+
 // ------------------------------------------------------------------ 服务状态
 
 async function refreshHealth() {
@@ -965,6 +1122,12 @@ async function refreshHealth() {
     const h = await api("/api/health");
     const items = [["OCR（MinerU）", h.mineru ? "up" : ""]];
     if (h.semantic) items.push(["Embedding", h.embedding ? "up" : ""]);
+    if (h.llm.enabled) items.push([`大模型${h.llm.model ? `（${h.llm.model}）` : ""}`, h.llm.up ? "up" : ""]);
+    if (llmEnabled !== h.llm.enabled) {
+      llmEnabled = h.llm.enabled;
+      document.querySelectorAll("[data-llm]").forEach((el) => { el.hidden = !llmEnabled; });
+      if (lib.data) renderDocs(); // 文件库可能先于服务状态加载，补上"服务内容"按钮
+    }
     $("#health").innerHTML = items.map(([n, c]) => `<span class="${c}">${n}</span>`).join("");
     $("#health").title = `已入库 ${h.documents} 份文档，${h.chunks} 个片段；OCR 服务只影响扫描件解析`;
   } catch {

@@ -12,6 +12,7 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "docsearch.db")
     monkeypatch.setattr(config, "USER_DICT", tmp_path / "userdict.txt")
     monkeypatch.setattr(config, "RERANK_ENABLED", False)
+    monkeypatch.setattr(config, "LLM_URL", "")  # 默认不连大模型；需要的测试用 FakeLLM 打开
     db.init()
     textproc.init()
     return tmp_path

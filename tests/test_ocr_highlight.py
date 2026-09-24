@@ -108,3 +108,68 @@ def test_old_mineru_without_middle_json_still_ingests(tmp_path, monkeypatch):
         assert conn.execute("SELECT status FROM documents WHERE id=?", (doc["id"],)).fetchone()[0] == "done"
     hl = TestClient(main.app).get(f"/api/documents/{doc['id']}/highlights", params={"q": "城市"}).json()
     assert [h["exact"] for h in hl["hits"]] == [False]  # 没有行坐标：退回整段框
+
+
+def test_ocr_progress_shows_speed_and_eta(tmp_path, mineru, monkeypatch):
+    from app import config
+    monkeypatch.setattr(config, "MINERU_BATCH_PAGES", 1)
+    _scanned_pdf(tmp_path / "one.pdf")
+    doc = pymupdf.open(tmp_path / "one.pdf")
+    for _ in range(2):  # 三页扫描件，每页一批
+        doc.insert_pdf(pymupdf.open(tmp_path / "one.pdf"))
+    doc.save(tmp_path / "three.pdf")
+    msgs = []
+    parser.parse_pdf(tmp_path / "three.pdf", lambda frac, msg: msgs.append(msg))
+    ocr = [m for m in msgs if m.startswith("OCR")]
+    assert ocr[0] == "OCR 识别 0/3 页（MinerU）"
+    assert all("秒/页" in m and "还需约" in m for m in ocr[1:]) and len(ocr) == 3
+
+
+def test_document_list_reports_server_time():
+    import time
+    r = TestClient(main.app).get("/api/documents").json()
+    assert abs(time.mktime(time.strptime(r["now"], "%Y-%m-%d %H:%M:%S")) - time.time()) < 5
+
+
+def test_progress_proportional_to_ocr_when_all_pages_scanned(tmp_path, mineru, monkeypatch):
+    """全是扫描页时，进度就是 OCR 的进度，不能一开始就跳到 30%。"""
+    from app import config
+    monkeypatch.setattr(config, "MINERU_BATCH_PAGES", 1)
+    _scanned_pdf(tmp_path / "one.pdf")
+    doc = pymupdf.open(tmp_path / "one.pdf")
+    for _ in range(3):
+        doc.insert_pdf(pymupdf.open(tmp_path / "one.pdf"))
+    doc.save(tmp_path / "four.pdf")
+    frames = []
+    parser.parse_pdf(tmp_path / "four.pdf", lambda frac, msg: frames.append((round(frac, 3), msg)))
+    assert [f for f, m in frames if m.startswith("OCR")] == [0.0, 0.25, 0.5, 0.75]
+
+
+def test_image_upload_is_ocrd_and_searchable(tmp_path, mineru):
+    """图片先转成 PDF，再当扫描页走 OCR：能检索、能预览、能定位关键字。"""
+    from app import search
+    src = pymupdf.open()
+    page = src.new_page(width=595, height=842)
+    page.insert_text((60, 100), LINE1, fontname="china-s", fontsize=12)
+    page.insert_text((60, 118), LINE2, fontname="china-s", fontsize=12)
+    png = tmp_path / "拍照.png"
+    page.get_pixmap(dpi=72).save(png)  # 72dpi：图片像素和页面坐标一一对应
+    doc = ingest.register_file(png, "拍照.png")
+    ingest.Worker()._step()
+    with db.session() as conn:
+        row = dict(conn.execute("SELECT * FROM documents WHERE id=?", (doc["id"],)).fetchone())
+    assert (row["status"], row["pages"], row["ocr_pages"]) == ("done", 1, 1), row["message"]
+    assert ingest.pdf_file(doc).exists() and ingest.orig_file(doc).exists()
+    assert search.search("城市")["total_hits"] == 1
+    client = TestClient(main.app)
+    assert client.get(f"/api/documents/{doc['id']}/pdf").headers["content-type"] == "application/pdf"
+    hl = client.get(f"/api/documents/{doc['id']}/highlights", params={"q": "城市"}).json()
+    assert [h["exact"] for h in hl["hits"]] == [True] and hl["ocr"]
+
+
+def test_unsupported_image_rejected(tmp_path):
+    import pytest
+    p = tmp_path / "a.webp"
+    p.write_bytes(b"RIFF0000WEBP")
+    with pytest.raises(ValueError, match="不支持的文件类型"):
+        ingest.register_file(p, "a.webp")

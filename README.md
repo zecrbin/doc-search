@@ -1,6 +1,6 @@
 # 文档检索
 
-上传 PDF / Word，按原文精确检索，点击结果在原文中高亮关键字。
+上传 PDF / Word / 图片，按原文精确检索，点击结果在原文中高亮关键字。
 
 ## 启动
 
@@ -24,6 +24,18 @@ uv run python -m app.main
 ```bash
 uv run python -m app.cli import D:\标书
 ```
+
+## 服务内容（大模型）
+
+文件解析完成后，自动调用大模型写一段"服务内容"（150～300 字，以"本项目"开头，说明建设内容、整合的资源、主要功能、关键技术、实现的价值，原文有服务范围时带上）。在文件库每行的"服务内容"按钮、或检索页右侧的"服务内容"按钮查看，可重新生成；文件库勾选后可批量生成。
+
+- **写法示例**：在数据目录下放 `summary_examples.txt`（UTF-8，每行一条本单位写好的服务内容），会取前 3 条作为写法参考放进提示词，生成的风格更贴近；这个文件只在本机，不进代码仓库。改了示例后，对已有文件"重新生成"即可。
+- 支持 OpenAI 兼容接口（llama.cpp 的 llama-server、vLLM、SGLang、LMDeploy、Ollama 等都提供）。先确认接口可用：`curl http://大模型IP:端口/v1/models`，能返回模型列表即可。
+- 地址 `DOCSEARCH_LLM_URL` 默认 `http://192.168.18.61:8001/v1`，设为空字符串则不生成概述；模型名 `DOCSEARCH_LLM_MODEL` 可不填（自动取第一个）；接口要密钥时配 `DOCSEARCH_LLM_API_KEY`。
+- 长文档先分段提取要点、再汇总。每段字数自动按模型上下文长度计算（llama.cpp 读 `/props` 里的 `n_ctx`，vLLM 读 `max_model_len`），取不到时 12000；超出上下文时自动减半重试。也可用 `DOCSEARCH_LLM_CHUNK_CHARS` 指定。
+- 配好后自检：`docker compose exec doc-search python -m app.cli llm`，会显示模型名、上下文长度、每段字数，并试调用一次。
+- 概述在单独的后台队列里生成，不影响解析和检索；Qwen3 等思考模型默认关闭思考（`DOCSEARCH_LLM_NO_THINK=1`），输出里的思考过程也会自动去掉。
+- 大模型连不上时概述会显示失败原因，其他功能不受影响。配置大模型之前已解析的文件不会自动补生成，在文件库勾选后点"生成概述"。
 
 ## 服务器部署（Docker）
 
@@ -54,7 +66,7 @@ docker compose logs -f        # 看日志
 ## 处理流程
 
 ```
-上传 → doc/docx 用本机 Word 转 PDF（没有 Word 时用 LibreOffice）
+上传 → doc/docx 用本机 Word 转 PDF（没有 Word 时用 LibreOffice）；图片（jpg/png/bmp/tif/gif）直接转 PDF，多页 TIFF 每帧一页
      → 逐页判断：有文字层的页 PyMuPDF 本地提取；扫描页/乱码页送 MinerU OCR
      → 去页眉页脚、识别标题层级、按结构切块（表格单独成块）
      → SQLite：片段原文 + 页码和坐标
@@ -75,6 +87,8 @@ docker compose logs -f        # 看日志
 | `EMBED_URL` | `http://192.168.18.61:18084` | Embedding / Rerank 服务（仅 `SEMANTIC=1` 时使用） |
 | `EMBED_QUERY_TIMEOUT` | `5` | 检索时查询向量化的超时（秒），超时后综合模式只用关键字结果 |
 | `PARSE_MODE` | `auto` | `mineru` 表示所有页都走 MinerU（慢，复杂版面更准） |
+| `MINERU_BATCH_PAGES` | `10` | 每次送给 MinerU 的页数；GPU 充足时调大（如 30）能提速 |
+| `MINERU_BACKEND` | `pipeline` | MinerU 解析后端；MinerU 部署了 VLM 加速时可改用对应后端 |
 | `CHUNK_TARGET` / `CHUNK_MAX` | `500` / `800` | 切块目标/最大字数 |
 
 升级后旧文档里横向（旋转）页面的高亮可能错位、扫描件只能框出整段，在文件库对这些文档点"重新解析"即可（扫描件会重新走一遍 OCR）。
