@@ -187,13 +187,16 @@ function highlighter(terms) {
 }
 
 // 命中位置前后各截一段作为摘要
+// 摘要：第一处命中前 20 字、后 60 字左右，换行和表格分隔合成一个空格；全文在"再点一次"时展开
+const SNIP_BEFORE = 20;
+const SNIP_LEN = 80;
 function snippet(text, terms) {
-  const low = text.toLowerCase();
+  const flat = text.replace(/\s*\|\s*/g, " | ").replace(/\s+/g, " ").trim();
+  const low = flat.toLowerCase();
   const at = Math.min(...terms.map((t) => low.indexOf(t)).filter((i) => i >= 0));
-  if (!Number.isFinite(at) || text.length <= 160) return text;
-  const start = Math.max(0, at - 50);
-  const end = Math.min(text.length, start + 160);
-  return `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
+  const start = Number.isFinite(at) ? Math.max(0, at - SNIP_BEFORE) : 0;
+  const end = Math.min(flat.length, start + SNIP_LEN);
+  return `${start > 0 ? "…" : ""}${flat.slice(start, end)}${end < flat.length ? "…" : ""}`;
 }
 
 function renderResults(data) {
@@ -211,7 +214,7 @@ function renderResults(data) {
         ${d.filename_match ? '<span class="tag name">文件名命中</span>' : ""}
         <span class="doc-count">${d.hit_count ? `${d.chunk_count} 段 · ${d.hit_count} 处` : ""}</span>
       </div>
-      ${d.chunks.length ? `<ol class="hits">${d.chunks.map((c) => hitHtml(c, hl, data.terms)).join("")}</ol>
+      ${d.chunks.length ? `<ol class="hits">${d.chunks.map((c, j) => hitHtml(c, d.chunks[j - 1], hl, data.terms)).join("")}</ol>
         <div class="doc-foot">${footHtml(d)}</div>`
         : '<div class="hit-none">正文里没有查询词，只有文件名命中</div>'}
     </li>`;
@@ -241,9 +244,11 @@ function renderFoot(idx) {
   card.querySelector(".doc-foot").innerHTML = footHtml(d);
 }
 
-function hitHtml(c, hl, terms) {
+// prev：同一文件里的上一段。标题和上一段相同就不重复显示（右侧正在看的那段照常显示）
+function hitHtml(c, prev, hl, terms) {
   const where = c.pages.length > 1 ? `第 ${c.pages[0]}–${c.pages.at(-1)} 页` : `第 ${c.page} 页`;
-  return `<li class="hit" data-chunk="${c.chunk_id}">
+  const same = prev && prev.heading === c.heading;
+  return `<li class="hit${same ? " same-heading" : ""}" data-chunk="${c.chunk_id}">
     <div class="hit-meta"><span class="hit-page">${where}</span>${c.kind === "table" ? '<span class="tag table">表格</span>' : ""}
       ${c.heading ? `<span class="hit-heading" title="${esc(c.heading)}">${esc(c.heading)}</span>` : ""}
       ${c.count > 1 ? `<span class="hit-n">本段 ${c.count} 处</span>` : ""}</div>
@@ -273,11 +278,12 @@ async function loadMoreOnce(idx) {
   try {
     const res = await api(`/api/documents/${d.doc_id}/hits?${new URLSearchParams({ q: data.query, offset: d.chunks.length, limit: MORE_PAGE })}`);
     if (state.data !== data) return false; // 期间又检索了别的
+    const before = d.chunks.length;
     d.chunks.push(...res.chunks);
     d.chunk_count = res.chunks.length ? res.total : d.chunks.length; // 期间文件被重新解析、段落变少了
     const hl = highlighter(data.terms);
     document.querySelector(`#results .doc[data-idx="${idx}"] .hits`)
-      .insertAdjacentHTML("beforeend", res.chunks.map((c) => hitHtml(c, hl, data.terms)).join(""));
+      .insertAdjacentHTML("beforeend", res.chunks.map((c, j) => hitHtml(c, d.chunks[before + j - 1], hl, data.terms)).join(""));
     return res.chunks.length > 0;
   } catch (err) {
     d.error = err.message;

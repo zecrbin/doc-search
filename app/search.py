@@ -11,7 +11,7 @@ from . import config, db, embedder, textproc
 
 RRF_K = 60
 CANDIDATES = 100
-PREVIEW = 5  # 检索结果里每个文件先带几段，其余展开时用 document_hits 分页取
+PREVIEW = 3  # 检索结果里每个文件先带几段，其余展开时用 document_hits 分页取（前端收起时也只留这么多，见 style.css）
 MODES = ("keyword", "hybrid", "semantic") if config.SEMANTIC else ("keyword",)
 
 
