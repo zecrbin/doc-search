@@ -12,16 +12,18 @@ CREATE TABLE IF NOT EXISTS documents(
   ext TEXT NOT NULL,
   sha256 TEXT NOT NULL UNIQUE,
   size INTEGER NOT NULL,
-  orig_path TEXT NOT NULL,
+  orig_path TEXT NOT NULL,  -- 只作记录；实际路径由 sha256 + ext 现算（ingest.orig_file），数据目录可整体搬走
   pdf_path TEXT,
   pages INTEGER,
   ocr_pages INTEGER DEFAULT 0,
   chunk_count INTEGER DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'queued',   -- queued / converting / parsing / embedding / done / failed
+  status TEXT NOT NULL DEFAULT 'queued',   -- importing / queued / converting / parsing / embedding / done / failed
   progress REAL DEFAULT 0,
   message TEXT,
   created_at TEXT DEFAULT (datetime('now', 'localtime')),
-  updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+  updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+  started_at TEXT,   -- 开始解析
+  finished_at TEXT   -- 解析完成或失败
 );
 CREATE TABLE IF NOT EXISTS chunks(
   id INTEGER PRIMARY KEY,
@@ -70,11 +72,23 @@ def session():
         conn.close()
 
 
+MIN_SQLITE = (3, 43, 0)  # chunks_fts 的 contentless_delete 选项
+
+
 def init():
+    if sqlite3.sqlite_version_info < MIN_SQLITE:
+        raise RuntimeError(
+            f"SQLite 版本过低：{sqlite3.sqlite_version}，需要 3.43 以上。"
+            "请用 uv 管理的 Python（uv run 默认即是）或 Python 3.12 官方安装包；Docker 镜像请基于 Debian 13（trixie）。")
     for d in (config.DATA_DIR, config.FILES_DIR, config.PARSED_DIR):
         d.mkdir(parents=True, exist_ok=True)
     with session() as conn:
         conn.executescript(SCHEMA)
+        # 旧库补列
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(documents)")}
+        for col in ("started_at", "finished_at"):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE documents ADD COLUMN {col} TEXT")
 
 
 def delete_chunks(conn: sqlite3.Connection, doc_id: int):
@@ -84,10 +98,11 @@ def delete_chunks(conn: sqlite3.Connection, doc_id: int):
     conn.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
 
 
-def update_doc(doc_id: int, **fields):
+def update_doc(doc_id: int, **fields) -> bool:
+    """返回文档是否还存在。"""
     cols = ", ".join(f"{k}=?" for k in fields)
     with session() as conn:
-        conn.execute(
+        return conn.execute(
             f"UPDATE documents SET {cols}, updated_at=datetime('now', 'localtime') WHERE id=?",
             (*fields.values(), doc_id),
-        )
+        ).rowcount > 0

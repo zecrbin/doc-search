@@ -1,0 +1,19 @@
+services:
+  doc-search:
+    build: .
+    image: doc-search:latest
+    container_name: doc-search
+    restart: unless-stopped
+    ports:
+      - "18090:18090"
+    volumes:
+      # 数据库、原文件、解析缓存都在这里，备份/迁移拷走这个目录即可
+      - ./data:/data
+      # 可选：放入 Windows 的中文字体（宋体、黑体、仿宋等），Word 转 PDF 的版式、页码更接近 Word
+      # - ./fonts:/usr/share/fonts/custom:ro
+    environment:
+      DOCSEARCH_MINERU_URL: http://192.168.18.61:8000
+      # MinerU 就在本机时写本机局域网 IP，不能写 127.0.0.1（容器里的 127.0.0.1 是容器自己）
+      # 语义检索默认关闭；开启后还要配置 DOCSEARCH_EMBED_URL
+      # DOCSEARCH_SEMANTIC: "1"
+      # DOCSEARCH_EMBED_URL: http://192.168.18.61:18084

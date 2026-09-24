@@ -3,6 +3,7 @@
 统一转成 PDF 后，解析、页码、bbox 和前端预览都走同一套坐标。
 """
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,16 @@ log = logging.getLogger(__name__)
 
 
 def to_pdf(src: Path, dst: Path):
+    # 先写临时文件再改名：转换中途失败不会留下半截 PDF 被"重新解析"当成已转换的结果复用
+    tmp = dst.with_name(dst.stem + ".part.pdf")
+    try:
+        _convert(src, tmp)
+        os.replace(tmp, dst)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _convert(src: Path, dst: Path):
     errors = []
     if sys.platform == "win32":
         try:
@@ -68,8 +79,10 @@ def _soffice_path() -> str | None:
 
 def _libreoffice(soffice: str, src: Path, dst: Path):
     with tempfile.TemporaryDirectory() as tmp:
+        # 独立的用户配置目录：用户自己开着 LibreOffice 时，默认配置会把转换交给已有实例，命令直接返回却不出文件
+        profile = (Path(tempfile.gettempdir()) / "docsearch-lo-profile").resolve().as_uri()
         subprocess.run(
-            [soffice, "--headless", "--convert-to", "pdf", "--outdir", tmp, str(src)],
+            [soffice, f"-env:UserInstallation={profile}", "--headless", "--convert-to", "pdf", "--outdir", tmp, str(src)],
             check=True, timeout=600, capture_output=True,
         )
         out = Path(tmp) / (src.stem + ".pdf")
