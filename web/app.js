@@ -230,14 +230,24 @@ function hitHtml(c, hl, terms) {
 }
 
 // 展开：从后端接着取这个文件剩下的段落，一次 MORE_PAGE 段，直到取完
-async function loadMore(idx, btn) {
+// 同一个文件同时只加载一批（手动点"展开"和右侧跳转触发的自动展开可能撞在一起）
+const moreLoading = new Map();
+function loadMore(idx, btn) {
+  if (!moreLoading.has(idx)) {
+    moreLoading.set(idx, loadMoreOnce(idx, btn).finally(() => moreLoading.delete(idx)));
+  }
+  return moreLoading.get(idx);
+}
+
+// 返回是否加载到了新段落
+async function loadMoreOnce(idx, btn) {
   const data = state.data;
   const d = data.docs[idx];
   btn.disabled = true;
   btn.textContent = "加载中…";
   try {
     const res = await api(`/api/documents/${d.doc_id}/hits?${new URLSearchParams({ q: data.query, offset: d.chunks.length, limit: MORE_PAGE })}`);
-    if (state.data !== data) return; // 期间又检索了别的
+    if (state.data !== data) return false; // 期间又检索了别的
     d.chunks.push(...res.chunks);
     d.chunk_count = res.total;
     const hl = highlighter(data.terms);
@@ -249,10 +259,11 @@ async function loadMore(idx, btn) {
     } else {
       btn.remove();
     }
-    if (state.active === idx && viewer.cur >= 0) markCurrent(); // 新加载的段落里可能有正在看的那段
+    return res.chunks.length > 0;
   } catch (err) {
     btn.disabled = false;
     btn.textContent = `加载失败（${err.message}），点击重试`;
+    return false;
   }
 }
 
@@ -262,7 +273,8 @@ $("#results").addEventListener("click", (e) => {
   const idx = +li.dataset.idx;
   const moreBtn = e.target.closest(".more");
   if (moreBtn) {
-    loadMore(idx, moreBtn);
+    // 新加载的段落里可能有右侧正在看的那段
+    loadMore(idx, moreBtn).then(() => state.active === idx && viewer.cur >= 0 && markCurrent());
     return;
   }
   const hit = e.target.closest(".hit");
@@ -376,12 +388,22 @@ function goTo(i) {
 // 左侧同步标出正在看的段落（还没展开加载的段落标不到，右侧照常跳转）
 function markCurrent(scroll = false) {
   const h = viewer.hits[viewer.cur];
+  let found = false;
   document.querySelectorAll("#results .hit").forEach((el) => {
     const on = +el.closest(".doc").dataset.idx === state.active && +el.dataset.chunk === h?.chunk_id;
+    found ||= on;
     el.classList.toggle("current", on);
     if (!on) el.classList.remove("expanded");
     if (on && scroll) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
   });
+  // 右侧跳到的段落左侧还没展开：自动展开（一批一批加载，直到这段出现），再标出来
+  const btn = document.querySelector(`#results .doc[data-idx="${state.active}"] .more`);
+  if (h && !found && btn) {
+    const idx = state.active;
+    loadMore(idx, btn).then((loaded) => {
+      if (loaded && state.active === idx && viewer.hits[viewer.cur] === h) markCurrent(scroll);
+    });
+  }
 }
 
 function step(delta) {
