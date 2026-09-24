@@ -252,7 +252,7 @@ def document_highlights(doc_id: int, q: str = Query(..., min_length=1, max_lengt
 @app.get("/api/health")
 def health():
     try:
-        mineru = httpx.get(f"{config.MINERU_URL}/health", timeout=5).status_code == 200
+        mineru = httpx.get(f"{config.MINERU_URL}/health", timeout=5, trust_env=False).status_code == 200
     except Exception:
         mineru = False
     with db.session() as conn:

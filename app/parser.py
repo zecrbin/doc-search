@@ -279,7 +279,7 @@ def _mineru(doc: pymupdf.Document, pages: list[int], progress: Progress,
     out: list[Block] = []
     lines: OcrLines = {}
     step = max(1, config.MINERU_BATCH_PAGES)
-    with httpx.Client(timeout=config.MINERU_TIMEOUT) as client:
+    with httpx.Client(timeout=config.MINERU_TIMEOUT, trust_env=False) as client:  # 内网服务，不走代理
         for start in range(0, len(pages), step):
             batch = pages[start:start + step]
             progress(0.3 + 0.7 * start / len(pages), f"OCR 识别 {start}/{len(pages)} 页（MinerU）")

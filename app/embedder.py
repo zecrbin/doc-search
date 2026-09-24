@@ -8,7 +8,8 @@ from . import config
 
 log = logging.getLogger(__name__)
 
-_client = httpx.Client(base_url=config.EMBED_URL, timeout=120)
+# 内网服务，不读 HTTP(S)_PROXY / ALL_PROXY：服务器或 Docker 配了代理（尤其 socks5）时会连不上或直接报错
+_client = httpx.Client(base_url=config.EMBED_URL, timeout=120, trust_env=False)
 _rerank_down_until = 0.0  # 重排服务不可用时暂停调用，避免每次检索都白等
 
 
