@@ -105,6 +105,7 @@ body { margin: 0; background: var(--bg); height: 100vh; display: flex; flex-dire
 .viewer-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .viewer-page, .viewer-hits { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .viewer-note { color: var(--warn); font-size: 12px; background: #fff3dc; border-radius: 4px; padding: 2px 8px; white-space: nowrap; }
+.viewer-note.soft { color: var(--muted); background: #f1f3f6; }
 .pages { flex: 1; overflow: auto; padding: 16px; position: relative; }
 .page { position: relative; margin: 0 auto 16px; background: #fff; box-shadow: 0 1px 4px rgba(20, 30, 50, .15); }
 .page canvas { display: block; width: 100%; height: 100%; }

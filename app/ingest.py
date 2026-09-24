@@ -54,10 +54,21 @@ def register_file(src: Path, filename: str) -> dict:
     return dict(row)
 
 
+def ocr_lines_path(doc_id: int) -> Path:
+    return config.PARSED_DIR / f"{doc_id}.ocr.json"
+
+
+def load_ocr_lines(doc_id: int) -> dict[int, list]:
+    p = ocr_lines_path(doc_id)
+    if not p.exists():
+        return {}
+    return {int(k): v for k, v in json.loads(p.read_text(encoding="utf-8")).items()}
+
+
 def remove_files(doc: dict):
     """删除文档的原文件、转换出的 PDF 和解析缓存。文件被占用（Windows 上正在解析）时只记日志，由后台线程处理完后再清一次。"""
     orig = Path(doc["orig_path"])
-    paths = [config.PARSED_DIR / f"{doc['id']}.json"]
+    paths = [config.PARSED_DIR / f"{doc['id']}.json", ocr_lines_path(doc["id"])]
     with db.session() as conn:
         # 删除后又重新上传了同一文件：文件名按 sha256 命名，是新文档在用
         reused = conn.execute("SELECT 1 FROM documents WHERE sha256=?", (doc["sha256"],)).fetchone()
@@ -102,9 +113,14 @@ def process(doc: dict):
     _update(doc_id, pdf_path=str(pdf))
 
     t0 = time.time()
-    blocks, pages, ocr_pages = parser.parse_pdf(pdf, progress("parsing", 0.05, 0.75 if config.SEMANTIC else 0.95))
+    blocks, pages, ocr_pages, ocr_lines = parser.parse_pdf(pdf, progress("parsing", 0.05, 0.75 if config.SEMANTIC else 0.95))
     (config.PARSED_DIR / f"{doc_id}.json").write_text(
         json.dumps([asdict(b) for b in blocks], ensure_ascii=False), encoding="utf-8")
+    ocr_path = ocr_lines_path(doc_id)
+    if ocr_lines:
+        ocr_path.write_text(json.dumps(ocr_lines, ensure_ascii=False), encoding="utf-8")
+    else:
+        ocr_path.unlink(missing_ok=True)
     chunks = chunker.build_chunks(blocks)
     log.info("%s：%d 页（OCR %d 页），%d 块，解析 %.1fs", doc["filename"], pages, ocr_pages, len(chunks), time.time() - t0)
     if not chunks:

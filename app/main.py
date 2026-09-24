@@ -136,13 +136,16 @@ def chunk_highlights(chunk_id: int, q: str = Query(..., min_length=1, max_length
     if not row:
         raise HTTPException(404, "片段不存在，请重新检索")
     regions = json.loads(row["regions"])
-    boxes = []
+    boxes, ocr_lines = [], {}
     if row["pdf_path"] and Path(row["pdf_path"]).exists():
         try:
-            boxes = highlight.keyword_boxes(row["pdf_path"], regions, q.split())
+            ocr_lines = ingest.load_ocr_lines(row["doc_id"])
+            boxes = highlight.keyword_boxes(row["pdf_path"], regions, q.split(), ocr_lines)
         except Exception:
             log.exception("关键字定位失败 chunk=%s", chunk_id)
-    return {"doc_id": row["doc_id"], "boxes": boxes or regions, "exact": bool(boxes)}
+    # ocr：关键字位置是按 OCR 行坐标估算的（扫描件）
+    ocr = bool(boxes) and any(int(b[0]) in ocr_lines for b in boxes)
+    return {"doc_id": row["doc_id"], "boxes": boxes or regions, "exact": bool(boxes), "ocr": ocr}
 
 
 @app.get("/api/health")

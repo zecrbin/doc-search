@@ -146,7 +146,7 @@ def test_highlights_fall_back_to_paragraph():
     from conftest import add_chunk
     cid = add_chunk(add_doc(), "质保期三年")  # 没有 PDF 文件（相当于扫描页找不到文字层）
     hl = TestClient(main.app).get(f"/api/chunks/{cid}/highlights", params={"q": "质保期"}).json()
-    assert hl == {"doc_id": hl["doc_id"], "boxes": [[0, 0, 0, 10, 10]], "exact": False}
+    assert hl == {"doc_id": hl["doc_id"], "boxes": [[0, 0, 0, 10, 10]], "exact": False, "ocr": False}
 
 
 def test_reindex_all_and_old_db_migration():

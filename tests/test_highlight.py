@@ -21,7 +21,7 @@ def _pdf(tmp_path, rotate=0):
 
 def _regions(path):
     """和入库时一样，用解析器取文字块作为片段范围。"""
-    blocks, _, _ = parser.parse_pdf(path, lambda *_: None)
+    blocks, *_ = parser.parse_pdf(path, lambda *_: None)
     return [[b.page, *b.bbox] for b in blocks]
 
 

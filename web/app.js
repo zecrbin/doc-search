@@ -159,8 +159,11 @@ async function openSource({ docId, filename, chunkId, regions }) {
   }
   const hl = await hlReq;
   if (token !== viewer.hlToken) return; // 期间又点了别的结果
-  $("#viewerNote").hidden = hl.exact;
-  $("#viewerNote").textContent = "扫描页没有文字层，只能定位到段落";
+  $("#viewerNote").hidden = hl.exact && !hl.ocr;
+  $("#viewerNote").className = `viewer-note${hl.exact ? " soft" : ""}`;
+  $("#viewerNote").textContent = hl.exact
+    ? "扫描件：按 OCR 识别位置定位"
+    : "扫描件未能定位到关键字（旧文档需重新解析），框出的是整段";
   $("#viewerHits").textContent = hl.exact ? `${hl.boxes.length} 处命中` : "";
   showHighlights(hl.boxes, hl.exact);
 }

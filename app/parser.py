@@ -18,6 +18,8 @@ from . import config
 log = logging.getLogger(__name__)
 
 Progress = Callable[[float, str], None]
+# OCR 页的文字行：{页号: [[文字, x0, y0, x1, y1], ...]}，扫描件上定位关键字用
+OcrLines = dict[int, list[list]]
 
 
 @dataclass
@@ -42,8 +44,8 @@ class _Raw:
     page_height: float = field(default=0, repr=False)
 
 
-def parse_pdf(pdf_path, progress: Progress) -> tuple[list[Block], int, int]:
-    """返回 (blocks, 页数, OCR 页数)。"""
+def parse_pdf(pdf_path, progress: Progress) -> tuple[list[Block], int, int, OcrLines]:
+    """返回 (blocks, 页数, OCR 页数, OCR 文字行)。"""
     doc = pymupdf.open(pdf_path)
     try:
         n = doc.page_count
@@ -62,15 +64,16 @@ def parse_pdf(pdf_path, progress: Progress) -> tuple[list[Block], int, int]:
         local_blocks = _classify(_drop_margins(raws, len(local_pages)))
 
         remote_blocks: list[Block] = []
+        ocr_lines: OcrLines = {}
         if ocr_pages:
-            remote_blocks = _mineru(doc, ocr_pages, progress, force_ocr=config.PARSE_MODE != "mineru")
+            remote_blocks, ocr_lines = _mineru(doc, ocr_pages, progress, force_ocr=config.PARSE_MODE != "mineru")
 
         by_page: dict[int, list[Block]] = defaultdict(list)
         for b in local_blocks + remote_blocks:
             by_page[b.page].append(b)
         blocks = [b for p in sorted(by_page) for b in by_page[p]]
         _mark_continuations(blocks)
-        return blocks, n, len(ocr_pages)
+        return blocks, n, len(ocr_pages), ocr_lines
     finally:
         doc.close()
 
@@ -271,8 +274,10 @@ def _classify(raws: list[_Raw]) -> list[Block]:
 _SKIP_TYPES = {"header", "footer", "page_number", "page_footnote", "aside_text", "discarded"}
 
 
-def _mineru(doc: pymupdf.Document, pages: list[int], progress: Progress, force_ocr: bool) -> list[Block]:
+def _mineru(doc: pymupdf.Document, pages: list[int], progress: Progress,
+            force_ocr: bool) -> tuple[list[Block], OcrLines]:
     out: list[Block] = []
+    lines: OcrLines = {}
     step = max(1, config.MINERU_BATCH_PAGES)
     with httpx.Client(timeout=config.MINERU_TIMEOUT) as client:
         for start in range(0, len(pages), step):
@@ -294,6 +299,7 @@ def _mineru(doc: pymupdf.Document, pages: list[int], progress: Progress, force_o
                     "table_enable": "true",
                     "return_md": "false",
                     "return_content_list": "true",
+                    "return_middle_json": "true",  # 带行级坐标，用于在扫描件上定位关键字
                 },
             )
             if resp.status_code != 200:
@@ -306,6 +312,44 @@ def _mineru(doc: pymupdf.Document, pages: list[int], progress: Progress, force_o
                 b = _mineru_block(item, batch, doc)
                 if b:
                     out.append(b)
+            try:
+                lines.update(_mineru_lines(result.get("middle_json"), batch, doc))
+            except Exception as e:  # 拿不到行坐标只影响扫描件上的关键字定位（退回整段框），不影响入库
+                log.warning("MinerU 行坐标解析失败：%s", e)
+    return out, lines
+
+
+def _iter_spans(blocks: list):
+    for b in blocks or []:
+        for line in b.get("lines") or []:
+            yield from line.get("spans") or []
+        yield from _iter_spans(b.get("blocks"))  # 表格、列表等嵌套块
+
+
+def _mineru_lines(middle, batch: list[int], doc: pymupdf.Document) -> OcrLines:
+    """middle_json 里每个文字 span（通常一行一个）的内容和坐标（PDF pt，按页面尺寸换算到本页）。"""
+    if not middle:
+        return {}
+    if isinstance(middle, str):
+        middle = json.loads(middle)
+    out: OcrLines = {}
+    for info in middle.get("pdf_info") or []:
+        idx = info.get("page_idx", 0)
+        if not 0 <= idx < len(batch):
+            continue
+        page = batch[idx]
+        rect = doc[page].rect
+        pw, ph = info.get("page_size") or (rect.width, rect.height)
+        sx, sy = rect.width / pw, rect.height / ph
+        spans = []
+        for s in _iter_spans(info.get("para_blocks")):
+            text, bbox = s.get("content"), s.get("bbox")
+            if s.get("type", "text") != "text" or not isinstance(text, str) or not text.strip() or not bbox or len(bbox) != 4:
+                continue
+            x0, y0, x1, y1 = bbox
+            spans.append([text, round(x0 * sx, 1), round(y0 * sy, 1), round(x1 * sx, 1), round(y1 * sy, 1)])
+        if spans:
+            out[page] = spans
     return out
 
 
