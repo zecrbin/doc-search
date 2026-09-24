@@ -12,10 +12,10 @@ _client = httpx.Client(base_url=config.EMBED_URL, timeout=120)
 _rerank_down_until = 0.0  # 重排服务不可用时暂停调用，避免每次检索都白等
 
 
-def _post(path: str, payload: dict, retries: int = 3) -> dict:
+def _post(path: str, payload: dict, retries: int = 3, timeout=httpx.USE_CLIENT_DEFAULT) -> dict:
     for attempt in range(retries):
         try:
-            r = _client.post(path, json=payload)
+            r = _client.post(path, json=payload, timeout=timeout)
             r.raise_for_status()
             return r.json()
         except (httpx.TransportError, httpx.HTTPStatusError) as e:
@@ -33,7 +33,9 @@ def embed_documents(texts: list[str]) -> list[list[float]]:
 
 
 def embed_query(text: str) -> list[float]:
-    return _post("/internal/embeddings/query", {"texts": [text]})["vectors"][0]
+    # 检索时用户在等：不重试、短超时，服务挂了尽快失败让综合模式退回关键字检索
+    return _post("/internal/embeddings/query", {"texts": [text]}, retries=1,
+                 timeout=config.EMBED_QUERY_TIMEOUT)["vectors"][0]
 
 
 def rerank(query: str, docs: list[tuple[str, str]]) -> dict[str, float] | None:
@@ -42,7 +44,7 @@ def rerank(query: str, docs: list[tuple[str, str]]) -> dict[str, float] | None:
     if not config.RERANK_ENABLED or not docs or time.time() < _rerank_down_until:
         return None
     try:
-        r = _client.post("/internal/rerank", timeout=30, json={
+        r = _client.post("/internal/rerank", timeout=httpx.Timeout(30, connect=config.EMBED_QUERY_TIMEOUT), json={
             "query": query[:4000],
             "documents": [{"documentId": i, "text": t[:12000]} for i, t in docs[:50]],
         })

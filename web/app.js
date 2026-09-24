@@ -47,7 +47,7 @@ async function runSearch() {
     const data = await api(`/api/search?${params}`);
     state.results = data.results;
     state.activeIdx = -1;
-    const extra = data.reranked ? " · 已重排" : "";
+    const extra = (data.reranked ? " · 已重排" : "") + (data.semantic_ok ? "" : " · 语义服务不可用，仅关键字结果");
     $("#meta").textContent = `${data.results.length} 条结果 · ${data.took_ms} ms${extra}`;
     renderResults(data);
   } catch (err) {
@@ -150,7 +150,7 @@ async function loadPdf(docId) {
   if (token !== viewer.token) { pdf.destroy(); return false; }
   viewer.pdf = pdf;
   viewer.docId = docId;
-  viewer.pages = sizes.map(([w, h]) => ({ w, h, scale: 1, el: null, rendered: false }));
+  viewer.pages = sizes.map(([w, h]) => ({ w, h, scale: 1, el: null, rendered: false, gen: 0, task: null, canvas: null }));
   layoutPages();
   return true;
 }
@@ -160,11 +160,15 @@ function layoutPages() {
   pagesEl.innerHTML = "";
   const avail = Math.max(300, pagesEl.clientWidth - 64);
   viewer.observer = new IntersectionObserver((entries) => {
-    entries.forEach((en) => en.isIntersecting && renderPage(+en.target.dataset.i));
+    entries.forEach((en) => {
+      const i = +en.target.dataset.i;
+      if (en.isIntersecting) renderPage(i);
+      else if (viewer.pages[i]) releasePage(viewer.pages[i]);
+    });
   }, { root: pagesEl, rootMargin: "800px 0px" });
   viewer.pages.forEach((p, i) => {
+    releasePage(p);
     p.scale = Math.min(avail / p.w, 2);
-    p.rendered = false;
     const el = document.createElement("div");
     el.className = "page";
     el.dataset.i = i;
@@ -182,18 +186,36 @@ async function renderPage(i) {
   const p = viewer.pages[i];
   if (!p || p.rendered || !viewer.pdf) return;
   p.rendered = true;
-  const page = await viewer.pdf.getPage(i + 1);
+  const gen = ++p.gen;
+  let page;
+  try {
+    page = await viewer.pdf.getPage(i + 1);
+  } catch {
+    return; // 文档已切换/销毁
+  }
+  // 等待期间页面被重新布局、移出视野或再次渲染，这次渲染作废，避免同一页叠两张 canvas
+  if (gen !== p.gen) return;
   const dpr = window.devicePixelRatio || 1;
   const vp = page.getViewport({ scale: p.scale * dpr });
   const canvas = document.createElement("canvas");
   canvas.width = Math.floor(vp.width);
   canvas.height = Math.floor(vp.height);
   p.el.prepend(canvas);
+  p.canvas = canvas;
+  p.task = page.render({ canvasContext: canvas.getContext("2d"), viewport: vp });
   try {
-    await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+    await p.task.promise;
   } catch (err) {
     if (err?.name !== "RenderingCancelledException") console.error(err);
   }
+}
+
+// 远离视野的页释放 canvas，几百页的标书滚一遍也不会把内存吃满
+function releasePage(p) {
+  p.gen++;
+  p.task?.cancel();
+  p.canvas?.remove();
+  Object.assign(p, { rendered: false, task: null, canvas: null });
 }
 
 function showHighlights(regions, flash = true) {
@@ -242,7 +264,7 @@ window.addEventListener("resize", () => {
 // ------------------------------------------------------------------ 文档库
 
 const STATUS = {
-  queued: "排队中", converting: "转换 PDF", parsing: "解析中", embedding: "向量化", done: "完成", failed: "失败",
+  importing: "导入中", queued: "排队中", converting: "转换 PDF", parsing: "解析中", embedding: "向量化", done: "完成", failed: "失败",
 };
 const busy = (d) => !["done", "failed"].includes(d.status);
 
@@ -332,19 +354,23 @@ function renderDocs() {
 $("#docRows").addEventListener("click", async (e) => {
   const re = e.target.closest("[data-reindex]");
   const del = e.target.closest("[data-del]");
-  if (re) {
-    await api(`/api/documents/${re.dataset.reindex}/reindex`, { method: "POST" });
-  } else if (del) {
-    const d = state.docs.find((x) => String(x.id) === del.dataset.del);
-    if (!confirm(`确定删除「${d?.filename}」？索引和文件都会一起删除。`)) return;
-    await api(`/api/documents/${del.dataset.del}`, { method: "DELETE" });
-    if (viewer.docId === +del.dataset.del) {
-      viewer.token++;
-      viewer.pdf?.destroy();
-      Object.assign(viewer, { pdf: null, docId: null, pages: [] });
-      pagesEl.innerHTML = `<div class="empty">文档已删除</div>`;
-      $("#viewerBar").hidden = true;
+  try {
+    if (re) {
+      await api(`/api/documents/${re.dataset.reindex}/reindex`, { method: "POST" });
+    } else if (del) {
+      const d = state.docs.find((x) => String(x.id) === del.dataset.del);
+      if (!confirm(`确定删除「${d?.filename}」？索引和文件都会一起删除。`)) return;
+      await api(`/api/documents/${del.dataset.del}`, { method: "DELETE" });
+      if (viewer.docId === +del.dataset.del) {
+        viewer.token++;
+        viewer.pdf?.destroy();
+        Object.assign(viewer, { pdf: null, docId: null, pages: [] });
+        pagesEl.innerHTML = `<div class="empty">文档已删除</div>`;
+        $("#viewerBar").hidden = true;
+      }
     }
+  } catch (err) {
+    alert(`操作失败：${err.message}`);
   }
   refreshDocs();
 });

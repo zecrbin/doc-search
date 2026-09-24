@@ -18,20 +18,29 @@ def search(q: str, mode: str = "hybrid", top_k: int = 20, doc_id: int | None = N
     terms = [t for t in q.lower().split() if t]
     scores: dict[int, float] = {}
     reranked = False
+    semantic_ok = True
 
     with db.session() as conn:
         if mode == "keyword":
-            ids = _keyword(conn, tokens, terms, doc_id)
+            ids = _keyword(conn, terms, doc_id)
             for rank, cid in enumerate(ids):
                 scores[cid] = 1 / (RRF_K + rank + 1)
         else:
             if mode == "hybrid" and tokens:
                 for rank, cid in enumerate(_fts(conn, textproc.fts_query(tokens, "OR"), doc_id, CANDIDATES)):
                     scores[cid] = scores.get(cid, 0) + 1 / (RRF_K + rank + 1)
-            for rank, cid in enumerate(_vector(conn, q, doc_id, CANDIDATES)):
+            try:
+                vec_ids = _vector(conn, q, doc_id, CANDIDATES)
+            except RuntimeError:  # embedding 服务不可用：综合模式退回纯关键字，语义模式只能报错
+                if mode != "hybrid" or not tokens:
+                    raise
+                vec_ids, semantic_ok = [], False
+            for rank, cid in enumerate(vec_ids):
                 scores[cid] = scores.get(cid, 0) + 1 / (RRF_K + rank + 1)
 
         rows = _load(conn, list(scores))
+        # 各条 SELECT 不在同一快照里，期间被删除/重新解析的片段在这里会查不到
+        scores = {cid: s for cid, s in scores.items() if cid in rows}
         if mode == "hybrid" and terms:
             # 原文里逐字出现查询词的，排到前面（标书检索很依赖编号、名称的精确命中）
             for cid, r in rows.items():
@@ -39,7 +48,7 @@ def search(q: str, mode: str = "hybrid", top_k: int = 20, doc_id: int | None = N
                 scores[cid] += 0.03 * sum(t in low for t in terms) / len(terms)
 
         ranked = sorted(scores, key=scores.get, reverse=True)
-        if mode != "keyword":
+        if mode != "keyword" and semantic_ok:  # 向量服务挂了，重排服务（同一台机器）多半也连不上
             head = ranked[:30]
             rr = embedder.rerank(q, [(str(c), f"{rows[c]['heading'] or ''}\n{rows[c]['text']}") for c in head])
             if rr:
@@ -79,7 +88,7 @@ def search(q: str, mode: str = "hybrid", top_k: int = 20, doc_id: int | None = N
                 "duplicates": [d for d in dups.get(r["text_hash"], []) if d["chunk_id"] != cid],
             })
 
-    return {"query": q, "mode": mode, "tokens": tokens, "reranked": reranked,
+    return {"query": q, "mode": mode, "tokens": tokens, "reranked": reranked, "semantic_ok": semantic_ok,
             "took_ms": int((time.time() - t0) * 1000), "results": out}
 
 
@@ -96,22 +105,25 @@ def _fts(conn, match: str, doc_id, limit: int) -> list[int]:
     return [r[0] for r in conn.execute(sql, args)]
 
 
-def _keyword(conn, tokens: list[str], terms: list[str], doc_id) -> list[int]:
-    """精确模式：原文必须逐字包含每个查询词。先用 FTS 缩小范围，分词对不上时退回全表扫描。"""
+def _keyword(conn, terms: list[str], doc_id) -> list[int]:
+    """精确模式：原文必须逐字包含每个查询词，按出现次数排序。
+
+    不能用 FTS 预筛：jieba 在不同上下文里切分不同（"质保期" 切成 质保/期，"质保期限" 切成 质保/期限），会漏掉逐字命中的片段。
+    """
     if not terms:
         return []
-    ids = _fts(conn, textproc.fts_query(tokens, "AND"), doc_id, 1000) if tokens else []
-    rows = _load(conn, ids)
-    hits = [c for c in ids if all(t in rows[c]["text"].lower() for t in terms)]
-    if hits:
-        return hits[:CANDIDATES]
-    sql = "SELECT id, text FROM chunks WHERE " + " AND ".join("instr(lower(text), ?) > 0" for _ in terms)
-    args = list(terms)
+    args: dict = {"limit": CANDIDATES}
+    where, counts = [], []
+    for i, t in enumerate(terms):
+        args[f"t{i}"] = t
+        where.append(f"instr(lower(text), :t{i}) > 0")
+        counts.append(f"(length(lower(text)) - length(replace(lower(text), :t{i}, ''))) / length(:t{i})")
     if doc_id:
-        sql += " AND doc_id = ?"
-        args.append(doc_id)
-    found = [(r[0], sum(r[1].lower().count(t) for t in terms)) for r in conn.execute(sql + " LIMIT 1000", args)]
-    return [cid for cid, _ in sorted(found, key=lambda x: -x[1])][:CANDIDATES]
+        where.append("doc_id = :doc_id")
+        args["doc_id"] = doc_id
+    sql = (f"SELECT id FROM chunks WHERE {' AND '.join(where)}"
+           f" ORDER BY {' + '.join(counts)} DESC, id LIMIT :limit")
+    return [r[0] for r in conn.execute(sql, args)]
 
 
 def _vector(conn, q: str, doc_id, k: int) -> list[int]:

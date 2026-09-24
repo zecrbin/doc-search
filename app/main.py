@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from . import config, db, embedder, ingest, search, textproc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger(__name__)
 mimetypes.add_type("text/javascript", ".mjs")  # PDF.js 是 ES module，Windows 注册表里常缺这个类型
 
 
@@ -45,6 +46,9 @@ def upload(files: list[UploadFile] = File(...)):
             out.append(ingest.register_file(Path(tmp.name), Path(f.filename).name))
         except ValueError as e:
             out.append({"filename": f.filename, "error": str(e)})
+        except Exception as e:  # 单个文件失败不影响同批其他文件
+            log.exception("上传失败：%s", f.filename)
+            out.append({"filename": f.filename, "error": str(e) or type(e).__name__})
         finally:
             Path(tmp.name).unlink(missing_ok=True)
     return out
@@ -65,9 +69,8 @@ def delete_document(doc_id: int):
         doc = _doc_or_404(conn, doc_id)
         db.delete_chunks(conn, doc_id)
         conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
-    for p in {doc["orig_path"], doc["pdf_path"]} - {None}:
-        Path(p).unlink(missing_ok=True)
-    (config.PARSED_DIR / f"{doc_id}.json").unlink(missing_ok=True)
+    # 正在处理的文档：后台线程在下一次更新进度时发现已删除，会停下并再清理一次文件
+    ingest.remove_files(doc)
     return {"ok": True}
 
 
@@ -75,7 +78,12 @@ def delete_document(doc_id: int):
 def reindex(doc_id: int):
     with db.session() as conn:
         _doc_or_404(conn, doc_id)
-    db.update_doc(doc_id, status="queued", progress=0, message=None)
+        # 只有已结束的文档能重新排队，否则后台线程写回进度/完成状态时会把这次请求覆盖掉
+        cur = conn.execute("UPDATE documents SET status='queued', progress=0, message=NULL,"
+                           " updated_at=datetime('now', 'localtime') WHERE id=? AND status IN ('done', 'failed')",
+                           (doc_id,))
+        if not cur.rowcount:
+            raise HTTPException(409, "文档正在处理中")
     ingest.worker.wake.set()
     return {"ok": True}
 

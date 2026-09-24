@@ -75,6 +75,9 @@ def _split_text(text: str) -> list[str]:
         return [text]
     pieces, cur = [], ""
     for sent in _SENT_END.split(text):
+        if len(sent) > config.CHUNK_MAX and cur:  # 硬切前先交出前面累积的句子，保持原文顺序
+            pieces.append(cur)
+            cur = ""
         while len(sent) > config.CHUNK_MAX:  # 没有标点的超长句硬切
             pieces.append(sent[:config.CHUNK_MAX])
             sent = sent[config.CHUNK_MAX:]
@@ -91,12 +94,16 @@ def _split_table(text: str) -> list[str]:
     if len(text) <= config.CHUNK_MAX:
         return [text]
     lines = text.split("\n")
+    if len(lines) == 1:
+        return [text[i:i + config.CHUNK_MAX] for i in range(0, len(text), config.CHUNK_MAX)]
     header, pieces, cur = lines[0], [], [lines[0]]
-    for line in lines[1:]:
+    # 超长的行按 CHUNK_MAX 拆成多段，不丢内容
+    segs = [line[i:i + config.CHUNK_MAX] for line in lines[1:] for i in range(0, len(line), config.CHUNK_MAX)]
+    for line in segs:
         if len(cur) > 1 and sum(map(len, cur)) + len(line) > config.CHUNK_MAX:
             pieces.append("\n".join(cur))
             cur = [header]
-        cur.append(line[:config.CHUNK_MAX])
+        cur.append(line)
     if len(cur) > 1:
         pieces.append("\n".join(cur))
     return pieces

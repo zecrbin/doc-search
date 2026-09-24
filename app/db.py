@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS documents(
   pages INTEGER,
   ocr_pages INTEGER DEFAULT 0,
   chunk_count INTEGER DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'queued',   -- queued / converting / parsing / embedding / done / failed
+  status TEXT NOT NULL DEFAULT 'queued',   -- importing / queued / converting / parsing / embedding / done / failed
   progress REAL DEFAULT 0,
   message TEXT,
   created_at TEXT DEFAULT (datetime('now', 'localtime')),
@@ -84,10 +84,11 @@ def delete_chunks(conn: sqlite3.Connection, doc_id: int):
     conn.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
 
 
-def update_doc(doc_id: int, **fields):
+def update_doc(doc_id: int, **fields) -> bool:
+    """返回文档是否还存在。"""
     cols = ", ".join(f"{k}=?" for k in fields)
     with session() as conn:
-        conn.execute(
+        return conn.execute(
             f"UPDATE documents SET {cols}, updated_at=datetime('now', 'localtime') WHERE id=?",
             (*fields.values(), doc_id),
-        )
+        ).rowcount > 0

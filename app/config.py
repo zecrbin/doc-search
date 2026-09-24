@@ -30,6 +30,8 @@ PARSE_MODE = _env("PARSE_MODE", "auto")
 EMBED_URL = _env("EMBED_URL", "http://192.168.18.61:18084").rstrip("/")
 EMBED_BATCH = int(_env("EMBED_BATCH", 16))
 EMBED_DIM = int(_env("EMBED_DIM", 1024))
+# 检索时查询向量化的超时（秒），入库时的批量向量化不受此限制
+EMBED_QUERY_TIMEOUT = float(_env("EMBED_QUERY_TIMEOUT", 5))
 RERANK_ENABLED = _env("RERANK", "1") == "1"
 
 CHUNK_TARGET = int(_env("CHUNK_TARGET", 500))
