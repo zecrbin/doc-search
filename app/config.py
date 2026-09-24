@@ -24,6 +24,8 @@ MINERU_URL = _env("MINERU_URL", "http://192.168.18.61:8000").rstrip("/")
 # 每次送给 MinerU 的页数，越小进度越细，越大请求次数越少
 MINERU_BATCH_PAGES = int(_env("MINERU_BATCH_PAGES", 10))
 MINERU_TIMEOUT = float(_env("MINERU_TIMEOUT", 1800))
+# MinerU 解析后端：pipeline（默认，兼容性最好）；MinerU 部署了 VLM 加速时可改 vlm-sglang-client 等，见 MinerU 文档
+MINERU_BACKEND = _env("MINERU_BACKEND", "pipeline")
 # auto：有文字层的页本地提取，扫描页走 MinerU OCR；mineru：所有页都交给 MinerU（慢，版面更准）
 PARSE_MODE = _env("PARSE_MODE", "auto")
 

@@ -3,6 +3,7 @@ import logging
 import mimetypes
 import shutil
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -94,8 +95,9 @@ def list_documents(page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, 
                   for k, w in _STATUS_WHERE.items()}
         overall = conn.execute(
             f"SELECT count(*), sum({_STATUS_WHERE['busy']}) FROM documents").fetchone()
+    # now：服务器当前时间。前端算"已用时间"要和 started_at 用同一个时钟，不能用浏览器所在电脑的时间
     return {"items": items, "total": total, "page": page, "page_size": page_size, "counts": counts,
-            "overall": {"all": overall[0], "busy": overall[1] or 0}}
+            "overall": {"all": overall[0], "busy": overall[1] or 0}, "now": time.strftime("%Y-%m-%d %H:%M:%S")}
 
 
 @app.get("/api/documents/ids")

@@ -86,6 +86,8 @@ docker compose logs -f        # 看日志
 | `EMBED_URL` | `http://192.168.18.61:18084` | Embedding / Rerank 服务（仅 `SEMANTIC=1` 时使用） |
 | `EMBED_QUERY_TIMEOUT` | `5` | 检索时查询向量化的超时（秒），超时后综合模式只用关键字结果 |
 | `PARSE_MODE` | `auto` | `mineru` 表示所有页都走 MinerU（慢，复杂版面更准） |
+| `MINERU_BATCH_PAGES` | `10` | 每次送给 MinerU 的页数；GPU 充足时调大（如 30）能提速 |
+| `MINERU_BACKEND` | `pipeline` | MinerU 解析后端；MinerU 部署了 VLM 加速时可改用对应后端 |
 | `CHUNK_TARGET` / `CHUNK_MAX` | `500` / `800` | 切块目标/最大字数 |
 
 升级后旧文档里横向（旋转）页面的高亮可能错位、扫描件只能框出整段，在文件库对这些文档点"重新解析"即可（扫描件会重新走一遍 OCR）。

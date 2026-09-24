@@ -690,6 +690,15 @@ async function doUpload(files) {
 const lib = { page: 1, pageSize: 50, status: "all", q: "", data: null, selected: new Set() };
 try { lib.pageSize = +localStorage.getItem("libPageSize") || 50; } catch {}
 
+const serverNow = () => Date.now() + (lib.clockOffset || 0);
+
+// 处理中文件的"已用时间"每秒走一次（列表本身 2 秒刷新一次）
+setInterval(() => {
+  document.querySelectorAll("#docRows [data-started]").forEach((td) => {
+    td.textContent = `已用 ${fmtDur(serverNow() - parseTime(td.dataset.started))}`;
+  });
+}, 1000);
+
 let pollTimer;
 async function refreshDocs() {
   clearTimeout(pollTimer);
@@ -707,6 +716,7 @@ async function refreshDocs() {
     return refreshDocs();
   }
   lib.data = data;
+  lib.clockOffset = parseTime(data.now) - Date.now(); // 服务器时钟 - 本机时钟
   renderDocs();
   const summarizing = data.items.some((d) => d.summary_status === "queued" || d.summary_status === "running");
   pollTimer = setTimeout(refreshDocs, data.overall.busy ? 2000 : summarizing ? 4000 : 15000);
@@ -741,7 +751,7 @@ function renderDocs() {
     `<button type="button" data-filter="${key}" class="${lib.status === key ? "on" : ""} ${key}">${label} <b>${counts[key]}</b></button>`,
   ).join("");
 
-  const now = Date.now();
+  const now = serverNow();
   $("#docRows").innerHTML = items.length ? items.map((d) => {
     const cls = d.status === "done" ? "done" : d.status === "failed" ? "failed" : "busy";
     let detail;
@@ -757,7 +767,8 @@ function renderDocs() {
     }
     const start = parseTime(d.started_at);
     const end = parseTime(d.finished_at);
-    const dur = start && end ? fmtDur(end - start) : start && busy(d) ? `已用 ${fmtDur(now - start)}` : "–";
+    const running = start && !end && busy(d);
+    const dur = start && end ? fmtDur(end - start) : running ? `已用 ${fmtDur(now - start)}` : "–";
     const sel = lib.selected.has(d.id);
     return `<tr class="${cls}${sel ? " selected" : ""}">
       <td class="check"><input type="checkbox" data-sel="${d.id}" ${sel ? "checked" : ""}></td>
@@ -768,7 +779,7 @@ function renderDocs() {
       <td class="detail">${detail}</td>
       <td class="time">${fmtTime(d.created_at)}</td>
       <td class="time">${fmtTime(d.finished_at)}</td>
-      <td class="num">${dur}</td>
+      <td class="num"${running ? ` data-started="${esc(d.started_at)}"` : ""}>${dur}</td>
       <td class="actions">
         ${summaryButton(d)}
         <a class="btn small" href="/api/documents/${d.id}/file" download>下载</a>

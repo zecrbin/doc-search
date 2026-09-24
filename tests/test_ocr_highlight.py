@@ -108,3 +108,24 @@ def test_old_mineru_without_middle_json_still_ingests(tmp_path, monkeypatch):
         assert conn.execute("SELECT status FROM documents WHERE id=?", (doc["id"],)).fetchone()[0] == "done"
     hl = TestClient(main.app).get(f"/api/documents/{doc['id']}/highlights", params={"q": "城市"}).json()
     assert [h["exact"] for h in hl["hits"]] == [False]  # 没有行坐标：退回整段框
+
+
+def test_ocr_progress_shows_speed_and_eta(tmp_path, mineru, monkeypatch):
+    from app import config
+    monkeypatch.setattr(config, "MINERU_BATCH_PAGES", 1)
+    _scanned_pdf(tmp_path / "one.pdf")
+    doc = pymupdf.open(tmp_path / "one.pdf")
+    for _ in range(2):  # 三页扫描件，每页一批
+        doc.insert_pdf(pymupdf.open(tmp_path / "one.pdf"))
+    doc.save(tmp_path / "three.pdf")
+    msgs = []
+    parser.parse_pdf(tmp_path / "three.pdf", lambda frac, msg: msgs.append(msg))
+    ocr = [m for m in msgs if m.startswith("OCR")]
+    assert ocr[0] == "OCR 识别 0/3 页（MinerU）"
+    assert all("秒/页" in m and "还需约" in m for m in ocr[1:]) and len(ocr) == 3
+
+
+def test_document_list_reports_server_time():
+    import time
+    r = TestClient(main.app).get("/api/documents").json()
+    assert abs(time.mktime(time.strptime(r["now"], "%Y-%m-%d %H:%M:%S")) - time.time()) < 5
