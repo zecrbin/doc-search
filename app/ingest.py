@@ -25,12 +25,12 @@ def register_file(src: Path, filename: str) -> dict:
         for block in iter(lambda: f.read(1 << 20), b""):
             h.update(block)
     sha = h.hexdigest()
-    dst = config.FILES_DIR / f"{sha}{ext}"
+    dst = orig_file({"sha256": sha, "ext": ext})
     # 先占位再拷文件：并发上传同一文件（多人上传、CLI 与网页同时导入）时，sha256 唯一约束保证只有一方继续
     with db.session() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO documents(filename, ext, sha256, size, orig_path, status) VALUES (?,?,?,?,?,'importing')",
-            (filename, ext, sha, src.stat().st_size, str(dst)),
+            (filename, ext, sha, src.stat().st_size, dst.name),
         )
         if not cur.rowcount:
             row = conn.execute("SELECT * FROM documents WHERE sha256=?", (sha,)).fetchone()
@@ -48,10 +48,22 @@ def register_file(src: Path, filename: str) -> dict:
         conn.execute("UPDATE documents SET status='queued', message=NULL WHERE id=?", (doc_id,))
         row = conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
     if row is None:  # 拷贝期间被删除
-        remove_files({"id": doc_id, "orig_path": str(dst), "pdf_path": None, "sha256": sha})
+        remove_files({"id": doc_id, "sha256": sha, "ext": ext})
         raise RuntimeError("导入过程中文档被删除")
     worker.wake.set()
     return dict(row)
+
+
+# 文件按内容的 sha256 命名存在 FILES_DIR 里，路径每次现算、不用库里存的：
+# 数据目录整体拷到别处（换机器、Windows 搬到 Linux/Docker）后照样能找到
+def orig_file(doc: dict) -> Path:
+    return config.FILES_DIR / f"{doc['sha256']}{doc['ext']}"
+
+
+def pdf_file(doc: dict) -> Path:
+    """用于解析和预览的 PDF：PDF 原文件本身，或 Word 转出来的同名 .pdf。"""
+    orig = orig_file(doc)
+    return orig if doc["ext"] == ".pdf" else orig.with_suffix(".pdf")
 
 
 def ocr_lines_path(doc_id: int) -> Path:
@@ -67,13 +79,12 @@ def load_ocr_lines(doc_id: int) -> dict[int, list]:
 
 def remove_files(doc: dict):
     """删除文档的原文件、转换出的 PDF 和解析缓存。文件被占用（Windows 上正在解析）时只记日志，由后台线程处理完后再清一次。"""
-    orig = Path(doc["orig_path"])
     paths = [config.PARSED_DIR / f"{doc['id']}.json", ocr_lines_path(doc["id"])]
     with db.session() as conn:
         # 删除后又重新上传了同一文件：文件名按 sha256 命名，是新文档在用
         reused = conn.execute("SELECT 1 FROM documents WHERE sha256=?", (doc["sha256"],)).fetchone()
     if not reused:
-        paths += {orig, orig.with_suffix(".pdf"), *([Path(doc["pdf_path"])] if doc.get("pdf_path") else [])}
+        paths += {orig_file(doc), pdf_file(doc)}
     for p in paths:
         try:
             p.unlink(missing_ok=True)
@@ -102,15 +113,11 @@ def process(doc: dict):
             _update(doc_id, status=stage, progress=round(lo + (hi - lo) * frac, 3), message=msg)
         return cb
 
-    orig = Path(doc["orig_path"])
-    if doc["ext"] == ".pdf":
-        pdf = orig
-    else:
-        pdf = orig.with_suffix(".pdf")
-        if not pdf.exists():
-            progress("converting", 0, 0.05)(0, "转换为 PDF")
-            convert.to_pdf(orig, pdf)
-    _update(doc_id, pdf_path=str(pdf))
+    pdf = pdf_file(doc)
+    if not pdf.exists():
+        progress("converting", 0, 0.05)(0, "转换为 PDF")
+        convert.to_pdf(orig_file(doc), pdf)
+    _update(doc_id, pdf_path=pdf.name)
 
     t0 = time.time()
     blocks, pages, ocr_pages, ocr_lines = parser.parse_pdf(pdf, progress("parsing", 0.05, 0.75 if config.SEMANTIC else 0.95))

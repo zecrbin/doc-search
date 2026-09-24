@@ -10,8 +10,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import config
-
 log = logging.getLogger(__name__)
 
 
@@ -82,7 +80,7 @@ def _soffice_path() -> str | None:
 def _libreoffice(soffice: str, src: Path, dst: Path):
     with tempfile.TemporaryDirectory() as tmp:
         # 独立的用户配置目录：用户自己开着 LibreOffice 时，默认配置会把转换交给已有实例，命令直接返回却不出文件
-        profile = (config.DATA_DIR / "lo_profile").resolve().as_uri()
+        profile = (Path(tempfile.gettempdir()) / "docsearch-lo-profile").resolve().as_uri()
         subprocess.run(
             [soffice, f"-env:UserInstallation={profile}", "--headless", "--convert-to", "pdf", "--outdir", tmp, str(src)],
             check=True, timeout=600, capture_output=True,

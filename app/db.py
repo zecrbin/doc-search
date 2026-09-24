@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS documents(
   ext TEXT NOT NULL,
   sha256 TEXT NOT NULL UNIQUE,
   size INTEGER NOT NULL,
-  orig_path TEXT NOT NULL,
+  orig_path TEXT NOT NULL,  -- 只作记录；实际路径由 sha256 + ext 现算（ingest.orig_file），数据目录可整体搬走
   pdf_path TEXT,
   pages INTEGER,
   ocr_pages INTEGER DEFAULT 0,
@@ -72,7 +72,14 @@ def session():
         conn.close()
 
 
+MIN_SQLITE = (3, 43, 0)  # chunks_fts 的 contentless_delete 选项
+
+
 def init():
+    if sqlite3.sqlite_version_info < MIN_SQLITE:
+        raise RuntimeError(
+            f"SQLite 版本过低：{sqlite3.sqlite_version}，需要 3.43 以上。"
+            "请用 uv 管理的 Python（uv run 默认即是）或 Python 3.12 官方安装包；Docker 镜像请基于 Debian 13（trixie）。")
     for d in (config.DATA_DIR, config.FILES_DIR, config.PARSED_DIR):
         d.mkdir(parents=True, exist_ok=True)
     with session() as conn:

@@ -25,6 +25,32 @@ uv run python -m app.main
 uv run python -m app.cli import D:\标书
 ```
 
+## 服务器部署（Docker）
+
+镜像里带了 LibreOffice 和中文字体（Linux 上没有 Word，doc/docx/rtf 用 LibreOffice 转 PDF）。
+
+```bash
+# 1. 构建镜像（在项目目录）；国内网络加上镜像源参数
+docker compose build
+#   或：docker build -t doc-search:latest \
+#         --build-arg APT_MIRROR=https://mirrors.aliyun.com \
+#         --build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple .
+
+# 2. 按需修改 docker-compose.yml 里的 MinerU 地址，然后启动
+docker compose up -d
+
+# 3. 浏览器打开 http://服务器IP:18090
+docker compose logs -f        # 看日志
+```
+
+- **数据**都在 `./data`（挂载到容器的 `/data`），删掉/升级容器不影响；备份就拷这个目录。
+- **从 Windows 迁移**：停掉 Windows 上的服务，把整个 `data` 目录拷到服务器项目目录下的 `data`，再 `docker compose up -d` 即可，不用重新解析。
+- **服务器不能上网**：在能上网的机器上构建，`docker save doc-search:latest | gzip > doc-search.tar.gz`，拷到服务器 `docker load < doc-search.tar.gz`，再 `docker compose up -d`（compose 文件和 `data` 目录一起拷过去）。
+- **升级**：拉取新代码后 `docker compose build && docker compose up -d`。
+- **Word 版式**：LibreOffice 排版和 Word 略有差别，个别文档的页码可能和 Word 里看到的差一两页。把 Windows 的中文字体（`C:\Windows\Fonts` 里的宋体、黑体、仿宋等）放到 `./fonts`，并打开 docker-compose.yml 里 fonts 那行挂载，能明显更接近 Word；之后对 Word 文档"重新解析"。
+- 只能跑**单进程**（不要开多个 uvicorn worker、也不要多个容器共用一个 `data`）：解析队列由进程内的后台线程处理。
+- 不用 Docker 也可以：装 `uv`、`libreoffice-writer`、中文字体（如 `fonts-noto-cjk`）后 `uv run python -m app.main`。需要 SQLite 3.43 以上，`uv` 自带的 Python 满足；Debian 12 / Ubuntu 22.04 等系统自带的 Python 不满足。
+
 ## 处理流程
 
 ```

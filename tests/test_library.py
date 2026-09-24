@@ -56,9 +56,9 @@ def test_batch_delete(tmp_path):
     assert r == {"deleted": 2}
     for d in docs[:2]:
         assert _status(d["id"]) is None
-        assert not ingest.Path(d["orig_path"]).exists()
+        assert not ingest.orig_file(d).exists()
         assert not (config.PARSED_DIR / f"{d['id']}.json").exists()
-    assert _status(keep["id"]) == "queued" and ingest.Path(keep["orig_path"]).exists()
+    assert _status(keep["id"]) == "queued" and ingest.orig_file(keep).exists()
     with db.session() as conn:
         assert conn.execute("SELECT count(*) FROM chunks").fetchone()[0] == 1
         assert conn.execute("SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH '付款'").fetchone()[0] == 1

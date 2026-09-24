@@ -66,7 +66,7 @@ def test_worker_stops_and_cleans_up_deleted_doc(tmp_path, monkeypatch):
     monkeypatch.setattr(ingest, "process", process)
     ingest.Worker()._step()
     assert not parsed.exists()
-    assert not ingest.Path(doc["orig_path"]).exists()
+    assert not ingest.orig_file(doc).exists()
 
 
 def test_worker_marks_failure(tmp_path, monkeypatch):
@@ -74,14 +74,14 @@ def test_worker_marks_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(ingest, "process", lambda d: (_ for _ in ()).throw(RuntimeError("坏文件")))
     ingest.Worker()._step()
     assert _status(doc["id"]) == "failed"
-    assert ingest.Path(doc["orig_path"]).exists()
+    assert ingest.orig_file(doc).exists()
 
 
 def test_remove_files_keeps_files_of_reuploaded_doc(tmp_path):
     doc = ingest.register_file(_src(tmp_path), "x.pdf")
     old = {**doc, "id": 999}  # 被删的旧记录，和新文档 sha256 相同
     ingest.remove_files(old)
-    assert ingest.Path(doc["orig_path"]).exists()
+    assert ingest.orig_file(doc).exists()
 
 
 def test_reindex_rejects_busy_doc():
@@ -99,7 +99,7 @@ def test_delete_removes_files(tmp_path):
     parsed.write_text(json.dumps([]))
     client = TestClient(main.app)
     assert client.delete(f"/api/documents/{doc['id']}").status_code == 200
-    assert not parsed.exists() and not ingest.Path(doc["orig_path"]).exists()
+    assert not parsed.exists() and not ingest.orig_file(doc).exists()
     assert _status(doc["id"]) is None
 
 
@@ -178,3 +178,27 @@ def test_reindex_all_and_old_db_migration():
     db.init()
     with db.session() as conn:
         assert "finished_at" in {r[1] for r in conn.execute("PRAGMA table_info(documents)")}
+
+
+def test_data_dir_can_be_moved(tmp_path, monkeypatch):
+    """数据目录整体拷到别处（例如从 Windows 搬到服务器/Docker 的 /data）后，预览、下载、高亮、删除都照常。"""
+    import shutil
+    doc = ingest.register_file(_real_pdf(tmp_path), "real.pdf")
+    ingest.Worker()._step()
+    # 模拟旧版本在 Windows 上存下的绝对路径
+    with db.session() as conn:
+        conn.execute("UPDATE documents SET orig_path=?, pdf_path=? WHERE id=?",
+                     (r"D:\workspace\doc-search\data\files\x.pdf", r"D:\workspace\doc-search\data\files\x.pdf", doc["id"]))
+    new = tmp_path / "moved"
+    shutil.copytree(config.DATA_DIR, new, ignore=shutil.ignore_patterns("moved"))
+    for name, sub in (("DATA_DIR", ""), ("FILES_DIR", "files"), ("PARSED_DIR", "parsed")):
+        monkeypatch.setattr(config, name, new / sub if sub else new)
+    monkeypatch.setattr(config, "DB_PATH", new / "docsearch.db")
+
+    client = TestClient(main.app)
+    assert client.get(f"/api/documents/{doc['id']}/pdf").status_code == 200
+    assert client.get(f"/api/documents/{doc['id']}/file").status_code == 200
+    hl = client.get(f"/api/documents/{doc['id']}/highlights", params={"q": "质保期"}).json()
+    assert [h["exact"] for h in hl["hits"]] == [True]
+    assert client.delete(f"/api/documents/{doc['id']}").status_code == 200
+    assert not (new / "files" / f"{doc['sha256']}.pdf").exists()

@@ -1,0 +1,8 @@
+.git
+.venv
+.idea
+.claude
+data
+tests
+**/__pycache__
+*.bat

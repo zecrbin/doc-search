@@ -168,16 +168,20 @@ def reindex(doc_id: int):
 def document_pdf(doc_id: int):
     with db.session() as conn:
         doc = _doc_or_404(conn, doc_id)
-    if not doc["pdf_path"] or not Path(doc["pdf_path"]).exists():
+    pdf = ingest.pdf_file(doc)
+    if not pdf.exists():
         raise HTTPException(404, "PDF 尚未生成")
-    return FileResponse(doc["pdf_path"], media_type="application/pdf")
+    return FileResponse(pdf, media_type="application/pdf")
 
 
 @app.get("/api/documents/{doc_id}/file")
 def document_file(doc_id: int):
     with db.session() as conn:
         doc = _doc_or_404(conn, doc_id)
-    return FileResponse(doc["orig_path"], filename=doc["filename"])
+    orig = ingest.orig_file(doc)
+    if not orig.exists():
+        raise HTTPException(404, "原文件不存在")
+    return FileResponse(orig, filename=doc["filename"])
 
 
 @app.get("/api/search")
@@ -215,10 +219,11 @@ def document_highlights(doc_id: int, q: str = Query(..., min_length=1, max_lengt
     chunks = [(cid, json.loads(rows[cid]["regions"])) for cid in ids if cid in rows]
     per_chunk = [[] for _ in chunks]
     ocr_lines = {}
-    if doc["pdf_path"] and Path(doc["pdf_path"]).exists():
+    pdf = ingest.pdf_file(doc)
+    if pdf.exists():
         try:
             ocr_lines = ingest.load_ocr_lines(doc_id)
-            per_chunk = highlight.keyword_matches(doc["pdf_path"], [r for _, r in chunks], terms, ocr_lines)
+            per_chunk = highlight.keyword_matches(pdf, [r for _, r in chunks], terms, ocr_lines)
         except Exception:
             log.exception("关键字定位失败 doc=%s", doc_id)
     # 一个文字块/表格被切成多段时，每段记录的位置都是整个块，各段会找到同样的命中：按位置去重，
