@@ -744,17 +744,44 @@ function renderPager(total) {
     prev = x;
     return `${gap}<button type="button" data-page="${x}" class="${x === cur ? "on" : ""}">${x}</button>`;
   }).join("");
+  // 正在输入跳转页码时不重画（处理中的文件每 2 秒刷新一次列表，会把输入冲掉）
+  if (document.activeElement?.id === "jumpPage") return;
+  const all = lib.data.overall.all;
+  const filtered = lib.status !== "all" || lib.q;
+  const summary = filtered
+    ? `筛选出 <b>${total}</b> 个文件<span class="muted">（全部 ${all} 个）</span>`
+    : `共 <b>${total}</b> 个文件`;
   $("#pager").innerHTML = `
-    <span class="muted">共 ${total} 个</span>
+    <span class="pager-info">${summary} · 第 <b>${cur}</b> / ${pages} 页</span>
     <span class="pages-btns">
       <button type="button" data-page="${cur - 1}" ${cur <= 1 ? "disabled" : ""}>‹ 上一页</button>${btns}
       <button type="button" data-page="${cur + 1}" ${cur >= pages ? "disabled" : ""}>下一页 ›</button>
     </span>
-    <label class="muted">每页 <select id="pageSize">${[20, 50, 100, 200].map((n) =>
-      `<option ${n === lib.pageSize ? "selected" : ""}>${n}</option>`).join("")}</select> 个</label>`;
+    <span class="pager-tools">
+      <label>每页 <select id="pageSize">${[20, 50, 100, 200].map((n) =>
+        `<option ${n === lib.pageSize ? "selected" : ""}>${n}</option>`).join("")}</select> 个</label>
+      <label>跳至 <input id="jumpPage" type="number" min="1" max="${pages}" inputmode="numeric"> 页</label>
+      <button type="button" class="btn small" id="jumpGo">跳转</button>
+    </span>`;
 }
 
+function jumpToPage() {
+  const input = $("#jumpPage");
+  const pages = Math.max(1, Math.ceil(lib.data.total / lib.pageSize));
+  const n = Math.round(+input.value);
+  if (!input.value || !Number.isFinite(n)) return input.focus();
+  input.value = "";
+  input.blur();
+  lib.page = Math.min(Math.max(1, n), pages); // 超出范围的跳到首页/末页
+  refreshDocs();
+  $(".lib-table-wrap").scrollTop = 0;
+}
+
+$("#pager").addEventListener("keydown", (e) => {
+  if (e.target.id === "jumpPage" && e.key === "Enter") jumpToPage();
+});
 $("#pager").addEventListener("click", (e) => {
+  if (e.target.id === "jumpGo") return jumpToPage();
   const b = e.target.closest("button[data-page]");
   if (!b || b.disabled || +b.dataset.page === lib.page) return;
   lib.page = +b.dataset.page;

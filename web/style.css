@@ -222,4 +222,9 @@ body { margin: 0; background: var(--bg); height: 100vh; display: flex; flex-dire
 .pages-btns button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .pages-btns button[disabled] { opacity: .4; cursor: default; }
 .pages-btns .gap { color: var(--muted); padding: 0 2px; }
-.pager select { font: inherit; font-size: 13px; padding: 2px 4px; border: 1px solid var(--line); border-radius: 4px; }
+.pager select, .pager input { font: inherit; font-size: 13px; padding: 3px 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+.pager input { width: 56px; text-align: center; }
+.pager input:focus, .pager select:focus { outline: none; border-color: var(--accent); }
+.pager-info { color: var(--ink); white-space: nowrap; }
+.pager-info b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.pager-tools { display: flex; align-items: center; gap: 10px; color: var(--muted); white-space: nowrap; }
