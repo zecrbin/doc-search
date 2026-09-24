@@ -1,3 +1,4 @@
+import json
 import logging
 import mimetypes
 import shutil
@@ -11,7 +12,7 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, db, embedder, ingest, search, textproc
+from . import config, db, embedder, highlight, ingest, search, textproc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ def list_documents():
     with db.session() as conn:
         docs = [dict(r) for r in conn.execute(
             "SELECT id, filename, ext, size, pages, ocr_pages, chunk_count, status, progress, message,"
-            " created_at, updated_at FROM documents ORDER BY id DESC")]
+            " created_at, updated_at, started_at, finished_at FROM documents ORDER BY id DESC")]
     return docs
 
 
@@ -74,14 +75,25 @@ def delete_document(doc_id: int):
     return {"ok": True}
 
 
+_REQUEUE = ("UPDATE documents SET status='queued', progress=0, message=NULL, started_at=NULL, finished_at=NULL,"
+            " updated_at=datetime('now', 'localtime')")
+
+
+@app.post("/api/documents/reindex")
+def reindex_all():
+    """全部重新解析（改了词典、升级了解析逻辑后用）。处理中的文档不受影响。"""
+    with db.session() as conn:
+        n = conn.execute(_REQUEUE + " WHERE status IN ('done', 'failed')").rowcount
+    ingest.worker.wake.set()
+    return {"queued": n}
+
+
 @app.post("/api/documents/{doc_id}/reindex")
 def reindex(doc_id: int):
     with db.session() as conn:
         _doc_or_404(conn, doc_id)
         # 只有已结束的文档能重新排队，否则后台线程写回进度/完成状态时会把这次请求覆盖掉
-        cur = conn.execute("UPDATE documents SET status='queued', progress=0, message=NULL,"
-                           " updated_at=datetime('now', 'localtime') WHERE id=? AND status IN ('done', 'failed')",
-                           (doc_id,))
+        cur = conn.execute(_REQUEUE + " WHERE id=? AND status IN ('done', 'failed')", (doc_id,))
         if not cur.rowcount:
             raise HTTPException(409, "文档正在处理中")
     ingest.worker.wake.set()
@@ -105,14 +117,32 @@ def document_file(doc_id: int):
 
 
 @app.get("/api/search")
-def do_search(q: str = Query(..., min_length=1, max_length=500), mode: str = "hybrid",
-              top_k: int = Query(20, ge=1, le=100), doc_id: int | None = None):
+def do_search(q: str = Query(..., min_length=1, max_length=500), mode: str = "keyword",
+              top_k: int = Query(20, ge=1, le=500), doc_id: int | None = None):
     if mode not in search.MODES:
         raise HTTPException(400, f"mode 只能是 {search.MODES}")
     try:
         return search.search(q, mode, top_k, doc_id)
     except RuntimeError as e:  # embedding 服务不可用
         raise HTTPException(503, str(e))
+
+
+@app.get("/api/chunks/{chunk_id}/highlights")
+def chunk_highlights(chunk_id: int, q: str = Query(..., min_length=1, max_length=500)):
+    """片段在原文 PDF 上的关键字框。找不到（扫描页没有文字层）时退回整段的框，exact=false。"""
+    with db.session() as conn:
+        row = conn.execute("SELECT c.doc_id, c.regions, d.pdf_path FROM chunks c JOIN documents d ON d.id = c.doc_id"
+                           " WHERE c.id=?", (chunk_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "片段不存在，请重新检索")
+    regions = json.loads(row["regions"])
+    boxes = []
+    if row["pdf_path"] and Path(row["pdf_path"]).exists():
+        try:
+            boxes = highlight.keyword_boxes(row["pdf_path"], regions, q.split())
+        except Exception:
+            log.exception("关键字定位失败 chunk=%s", chunk_id)
+    return {"doc_id": row["doc_id"], "boxes": boxes or regions, "exact": bool(boxes)}
 
 
 @app.get("/api/health")
@@ -124,7 +154,8 @@ def health():
     with db.session() as conn:
         stats = conn.execute(
             "SELECT (SELECT count(*) FROM documents WHERE status='done'), (SELECT count(*) FROM chunks)").fetchone()
-    return {"mineru": mineru, **embedder.health(), "documents": stats[0], "chunks": stats[1]}
+    emb = embedder.health() if config.SEMANTIC else {}
+    return {"mineru": mineru, "semantic": config.SEMANTIC, **emb, "documents": stats[0], "chunks": stats[1]}
 
 
 app.mount("/static", StaticFiles(directory=config.WEB_DIR), name="static")

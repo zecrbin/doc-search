@@ -6,6 +6,8 @@ const PDF_OPTS = {
   cMapPacked: true,
   standardFontDataUrl: "/static/vendor/pdfjs/standard_fonts/",
 };
+const TOP_K = 200;
+const ACCEPT = [".pdf", ".doc", ".docx", ".rtf"];
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -20,35 +22,48 @@ async function api(path, opts) {
   return r.json();
 }
 
+// ------------------------------------------------------------------ 页面切换
+
+function showView(name) {
+  $("#viewSearch").hidden = name !== "search";
+  $("#viewLibrary").hidden = name !== "library";
+  document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.view === name));
+  if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
+  if (name === "library") refreshDocs();
+  else if (viewer.pdf) requestAnimationFrame(relayout); // 隐藏期间窗口大小可能变了
+}
+$("#tabs").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-view]");
+  if (b) showView(b.dataset.view);
+});
+
 // ------------------------------------------------------------------ 检索
 
-const state = { mode: "hybrid", results: [], activeIdx: -1, docs: [] };
+const state = { results: [], query: "", current: null, docs: [], filter: "all" };
 
-$("#mode").addEventListener("click", (e) => {
-  const b = e.target.closest("button");
-  if (!b) return;
-  state.mode = b.dataset.mode;
-  document.querySelectorAll("#mode button").forEach((x) => x.classList.toggle("on", x === b));
-  if ($("#q").value.trim()) runSearch();
-});
 $("#docFilter").addEventListener("change", () => $("#q").value.trim() && runSearch());
 $("#searchForm").addEventListener("submit", (e) => { e.preventDefault(); runSearch(); });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "/" && document.activeElement.tagName !== "INPUT") { e.preventDefault(); $("#q").focus(); }
+  if (e.key === "/" && !["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) {
+    e.preventDefault();
+    showView("search");
+    $("#q").focus();
+  }
 });
 
 async function runSearch() {
   const q = $("#q").value.trim();
   if (!q) return;
-  const params = new URLSearchParams({ q, mode: state.mode, top_k: 30 });
+  const params = new URLSearchParams({ q, mode: "keyword", top_k: TOP_K });
   if ($("#docFilter").value) params.set("doc_id", $("#docFilter").value);
   $("#meta").textContent = "检索中…";
   try {
     const data = await api(`/api/search?${params}`);
     state.results = data.results;
-    state.activeIdx = -1;
-    const extra = (data.reranked ? " · 已重排" : "") + (data.semantic_ok ? "" : " · 语义服务不可用，仅关键字结果");
-    $("#meta").textContent = `${data.results.length} 条结果 · ${data.took_ms} ms${extra}`;
+    state.query = data.query;
+    state.current = null;
+    const more = data.results.length >= TOP_K ? `（只显示前 ${TOP_K} 条，可加词或选定文档缩小范围）` : "";
+    $("#meta").textContent = `${data.results.length} 条结果${more} · ${data.took_ms} ms`;
     renderResults(data);
   } catch (err) {
     $("#meta").textContent = "";
@@ -56,11 +71,11 @@ async function runSearch() {
   }
 }
 
-function highlighter(data) {
-  // 查询原词 + 分词结果；单字分词太碎，只在查询本身是单字时保留
-  const words = new Set(data.query.toLowerCase().split(/\s+/).filter(Boolean));
-  data.tokens.forEach((t) => (t.length > 1 || data.query.length === 1) && words.add(t));
-  const list = [...words].sort((a, b) => b.length - a.length).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+function highlighter(query) {
+  // 精确匹配：只标出查询里的原词（空格分隔的每个词）
+  const list = [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))]
+    .sort((a, b) => b.length - a.length)
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   if (!list.length) return esc;
   const re = new RegExp(`(${list.join("|")})`, "gi");
   return (text) => text.split(re).map((part, i) => (i % 2 ? `<mark>${esc(part)}</mark>` : esc(part))).join("");
@@ -69,20 +84,21 @@ function highlighter(data) {
 function renderResults(data) {
   const ol = $("#results");
   if (!data.results.length) {
-    ol.innerHTML = `<li class="hint">没有找到相关内容。<br>试试换个说法，或切换到“综合 / 语义”模式。</li>`;
+    ol.innerHTML = `<li class="hint">没有找到逐字包含「${esc(data.query)}」的内容。<br>多个词用空格分隔时，要求每个词都出现在同一段里。</li>`;
     return;
   }
-  const hl = highlighter(data);
+  const hl = highlighter(data.query);
   ol.innerHTML = data.results.map((r, i) => {
     const pages = r.pages.length > 1 ? `第 ${r.pages[0]}–${r.pages.at(-1)} 页` : `第 ${r.page} 页`;
     const dups = r.duplicates.length
       ? `<details class="dups"><summary>相同段落还出现在 ${r.duplicates.length} 处</summary><ul>${
-          r.duplicates.slice(0, 50).map((d, j) => `<li><a data-dup="${j}">${esc(d.filename)}</a> · 第 ${d.page} 页</li>`).join("")
+          r.duplicates.slice(0, 50).map((d, j) => `<li data-dup="${j}"><span class="dup-file">${esc(d.filename)}</span> · 第 ${d.page} 页<span class="here">正在查看</span></li>`).join("")
         }</ul></details>`
       : "";
     return `<li class="result" data-idx="${i}">
       <div class="result-head">
         <span class="result-file" title="${esc(r.filename)}">${esc(r.filename)}</span>
+        <span class="here">正在查看</span>
         ${r.kind === "table" ? '<span class="tag table">表格</span>' : ""}
         <span class="result-page">${pages}</span>
       </div>
@@ -96,34 +112,57 @@ function renderResults(data) {
 $("#results").addEventListener("click", (e) => {
   const li = e.target.closest(".result");
   if (!li) return;
-  const r = state.results[+li.dataset.idx];
-  const dupLink = e.target.closest("[data-dup]");
-  if (dupLink) {
-    const d = r.duplicates[+dupLink.dataset.dup];
-    openSource(d.doc_id, d.filename, d.regions);
+  const idx = +li.dataset.idx;
+  const dupEl = e.target.closest("[data-dup]");
+  if (dupEl) {
+    select(idx, +dupEl.dataset.dup);
     return;
   }
   if (e.target.closest("summary")) return;
-  document.querySelectorAll(".result.active").forEach((x) => x !== li && x.classList.remove("active", "expanded"));
   if (li.classList.contains("active")) li.classList.toggle("expanded");
-  li.classList.add("active");
-  openSource(r.doc_id, r.filename, r.regions);
+  select(idx, null);
 });
+
+// 选中一条结果（dup 为相同段落里的第几处，null 表示结果本身），并标出右侧正在看的是哪个文件
+function select(idx, dup) {
+  const r = state.results[idx];
+  state.current = { idx, dup };
+  document.querySelectorAll("#results .result").forEach((el) => {
+    const on = +el.dataset.idx === idx;
+    el.classList.toggle("active", on);
+    if (!on) el.classList.remove("expanded");
+    el.querySelector(".result-head").classList.toggle("current", on && dup === null);
+    el.querySelectorAll("[data-dup]").forEach((d) => d.classList.toggle("current", on && +d.dataset.dup === dup));
+  });
+  const t = dup === null ? r : r.duplicates[dup];
+  openSource({ docId: t.doc_id, filename: t.filename, chunkId: t.chunk_id, regions: t.regions });
+}
 
 // ------------------------------------------------------------------ 原文预览
 
-const viewer = { docId: null, pdf: null, pages: [], token: 0, regions: [], observer: null };
+const viewer = { docId: null, pdf: null, pages: [], token: 0, hlToken: 0, boxes: [], exact: true, observer: null };
 const pagesEl = $("#pages");
 
-async function openSource(docId, filename, regions) {
+async function openSource({ docId, filename, chunkId, regions }) {
   $("#viewerBar").hidden = false;
   $("#viewerTitle").textContent = filename;
+  $("#viewerTitle").title = filename;
   $("#downloadOrig").href = `/api/documents/${docId}/file`;
+  $("#viewerNote").hidden = true;
+  $("#viewerHits").textContent = "";
+  const token = ++viewer.hlToken;
+  const hlReq = api(`/api/chunks/${chunkId}/highlights?${new URLSearchParams({ q: state.query })}`)
+    .catch(() => ({ boxes: regions, exact: false }));
   if (viewer.docId !== docId) {
     const ok = await loadPdf(docId);
     if (!ok) return;
   }
-  showHighlights(regions);
+  const hl = await hlReq;
+  if (token !== viewer.hlToken) return; // 期间又点了别的结果
+  $("#viewerNote").hidden = hl.exact;
+  $("#viewerNote").textContent = "扫描页没有文字层，只能定位到段落";
+  $("#viewerHits").textContent = hl.exact ? `${hl.boxes.length} 处命中` : "";
+  showHighlights(hl.boxes, hl.exact);
 }
 
 async function loadPdf(docId) {
@@ -218,16 +257,17 @@ function releasePage(p) {
   Object.assign(p, { rendered: false, task: null, canvas: null });
 }
 
-function showHighlights(regions, flash = true) {
-  viewer.regions = regions;
+function showHighlights(boxes, exact, flash = true) {
+  viewer.boxes = boxes;
+  viewer.exact = exact;
   pagesEl.querySelectorAll(".hl").forEach((x) => x.remove());
   let first = null;
-  for (const [pg, x0, y0, x1, y1] of regions) {
+  const pad = exact ? 1.5 : 3;
+  for (const [pg, x0, y0, x1, y1] of boxes) {
     const p = viewer.pages[pg];
     if (!p) continue;
-    const pad = 3;
     const div = document.createElement("div");
-    div.className = flash ? "hl flash" : "hl";
+    div.className = `hl ${exact ? "kw" : "para"}${flash ? " flash" : ""}`;
     Object.assign(div.style, {
       left: `${x0 * p.scale - pad}px`, top: `${y0 * p.scale - pad}px`,
       width: `${(x1 - x0) * p.scale + pad * 2}px`, height: `${(y1 - y0) * p.scale + pad * 2}px`,
@@ -249,27 +289,53 @@ function updatePageIndicator() {
 }
 pagesEl.addEventListener("scroll", () => requestAnimationFrame(updatePageIndicator), { passive: true });
 
+function relayout() {
+  if (!viewer.pdf || !pagesEl.clientWidth) return;
+  const ratio = pagesEl.scrollTop / Math.max(1, pagesEl.scrollHeight);
+  layoutPages();
+  showHighlights(viewer.boxes, viewer.exact, false);
+  pagesEl.scrollTop = ratio * pagesEl.scrollHeight;
+}
 let resizeTimer;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => {
-    if (!viewer.pdf) return;
-    const ratio = pagesEl.scrollTop / Math.max(1, pagesEl.scrollHeight);
-    layoutPages();
-    showHighlights(viewer.regions, false);
-    pagesEl.scrollTop = ratio * pagesEl.scrollHeight;
-  }, 200);
+  resizeTimer = setTimeout(relayout, 200);
 });
 
-// ------------------------------------------------------------------ 文档库
+// ------------------------------------------------------------------ 文件库
 
 const STATUS = {
-  importing: "导入中", queued: "排队中", converting: "转换 PDF", parsing: "解析中", embedding: "向量化", done: "完成", failed: "失败",
+  importing: "导入中", queued: "排队中", converting: "转换 PDF", parsing: "解析中", embedding: "向量化", done: "成功", failed: "失败",
 };
 const busy = (d) => !["done", "failed"].includes(d.status);
+const FILTERS = [
+  ["all", "全部", () => true],
+  ["busy", "处理中", busy],
+  ["done", "成功", (d) => d.status === "done"],
+  ["failed", "失败", (d) => d.status === "failed"],
+];
 
-$("#openLibrary").addEventListener("click", () => { $("#library").showModal(); refreshDocs(); });
-$("#closeLibrary").addEventListener("click", () => $("#library").close());
+const parseTime = (s) => (s ? new Date(s.replace(" ", "T")) : null);
+const fmtTime = (s) => (s ? s.slice(0, 16) : "–");
+function fmtDur(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} 秒`;
+  if (s < 3600) return `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
+  return `${Math.floor(s / 3600)} 小时 ${Math.floor((s % 3600) / 60)} 分`;
+}
+function fmtSize(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 ** 2).toFixed(1)} MB`;
+}
+
+$("#statusFilter").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-filter]");
+  if (!b) return;
+  state.filter = b.dataset.filter;
+  renderDocs();
+});
+
 $("#fileInput").addEventListener("change", (e) => { upload(e.target.files); e.target.value = ""; });
 
 const dz = $("#dropzone");
@@ -288,24 +354,65 @@ window.addEventListener("drop", (e) => {
   if (e.dataTransfer?.files.length) upload(e.dataTransfer.files);
 });
 
-async function upload(fileList) {
-  const files = [...fileList];
-  if (!files.length) return;
-  if (!$("#library").open) $("#library").showModal();
+function postFiles(fd, onProgress) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open("POST", "/api/documents");
+    x.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    x.onload = () => {
+      let body = null;
+      try { body = JSON.parse(x.responseText); } catch {}
+      if (x.status >= 200 && x.status < 300 && body) resolve(body);
+      else reject(new Error(body?.detail || x.statusText || `HTTP ${x.status}`));
+    };
+    x.onerror = () => reject(new Error("网络错误，服务是否在运行？"));
+    x.send(fd);
+  });
+}
+
+function notice(kind, title, names = []) {
+  const div = document.createElement("div");
+  div.className = `notice ${kind}`;
+  div.innerHTML = `<button class="close" title="关闭">×</button><strong>${esc(title)}</strong>${
+    names.length ? `<ul>${names.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}`;
+  div.querySelector(".close").addEventListener("click", () => div.remove());
+  $("#notices").prepend(div);
+}
+
+let uploadChain = Promise.resolve();
+function upload(fileList) {
+  const all = [...fileList];
+  if (!all.length) return;
+  showView("library");
+  const bad = all.filter((f) => !ACCEPT.some((ext) => f.name.toLowerCase().endsWith(ext)));
+  const files = all.filter((f) => !bad.includes(f));
+  if (bad.length) notice("bad", `不支持的文件类型，已跳过 ${bad.length} 个`, bad.map((f) => f.name));
+  if (files.length) uploadChain = uploadChain.then(() => doUpload(files));
+}
+
+async function doUpload(files) {
+  const total = files.reduce((s, f) => s + f.size, 0);
   const fd = new FormData();
   files.forEach((f) => fd.append("files", f));
-  dz.querySelector("strong").textContent = `正在上传 ${files.length} 个文件…`;
+  $("#uploadPanel").hidden = false;
+  $("#uploadText").textContent = `正在上传 ${files.length} 个文件（${fmtSize(total)}）`;
+  const setPct = (frac) => {
+    $("#uploadBar").style.width = `${Math.round(frac * 100)}%`;
+    $("#uploadPct").textContent = frac < 1 ? `${Math.round(frac * 100)}%` : "服务器校验中…";
+  };
+  setPct(0);
   try {
-    const res = await api("/api/documents", { method: "POST", body: fd });
-    const errs = res.filter((r) => r.error).map((r) => `${r.filename}：${r.error}`);
+    const res = await postFiles(fd, setPct);
+    const ok = res.filter((r) => !r.error && !r.duplicate).map((r) => r.filename);
     const dups = res.filter((r) => r.duplicate).map((r) => r.filename);
-    if (errs.length || dups.length) {
-      alert([...errs, ...(dups.length ? [`已存在，跳过：${dups.join("、")}`] : [])].join("\n"));
-    }
+    const errs = res.filter((r) => r.error).map((r) => `${r.filename}：${r.error}`);
+    if (ok.length) notice("ok", `已上传 ${ok.length} 个，正在排队解析`, ok);
+    if (dups.length) notice("dup", `${dups.length} 个文件库里已有（内容相同），已跳过`, dups);
+    if (errs.length) notice("bad", `${errs.length} 个上传失败`, errs);
   } catch (err) {
-    alert(`上传失败：${err.message}`);
+    notice("bad", `上传失败：${err.message}`, files.map((f) => f.name));
   } finally {
-    dz.querySelector("strong").textContent = "点击选择文件或拖拽到这里";
+    $("#uploadPanel").hidden = true;
     refreshDocs();
   }
 }
@@ -326,29 +433,57 @@ async function refreshDocs() {
 function renderDocs() {
   const docs = state.docs;
   const done = docs.filter((d) => d.status === "done");
+  const nBusy = docs.filter(busy).length;
   $("#docCount").textContent = docs.length;
+  $("#busyCount").hidden = !nBusy;
+  $("#busyCount").textContent = `${nBusy} 处理中`;
+
   const sel = $("#docFilter");
   const cur = sel.value;
   sel.innerHTML = `<option value="">全部文档（${done.length}）</option>` +
     done.map((d) => `<option value="${d.id}">${esc(d.filename)}</option>`).join("");
   sel.value = done.some((d) => String(d.id) === cur) ? cur : "";
 
-  $("#docRows").innerHTML = docs.length ? docs.map((d) => {
+  $("#statusFilter").innerHTML = FILTERS.map(([key, label, fn]) =>
+    `<button type="button" data-filter="${key}" class="${state.filter === key ? "on" : ""} ${key}">${label} <b>${docs.filter(fn).length}</b></button>`,
+  ).join("");
+
+  // 排队顺序：后台按 id 从小到大处理
+  const queue = docs.filter((d) => d.status === "queued").map((d) => d.id).sort((a, b) => a - b);
+  const now = Date.now();
+  const shown = docs.filter(FILTERS.find(([k]) => k === state.filter)[2]);
+  $("#docRows").innerHTML = shown.length ? shown.map((d) => {
     const cls = d.status === "done" ? "done" : d.status === "failed" ? "failed" : "busy";
-    const bar = busy(d) ? `<div class="bar"><i style="width:${Math.round((d.progress || 0) * 100)}%"></i></div>` : "";
-    const msg = d.message ? `<span class="msg" title="${esc(d.message)}">${esc(d.message)}</span>` : "";
-    const pages = d.pages ? `${d.pages}${d.ocr_pages ? `<br><small>OCR ${d.ocr_pages}</small>` : ""}` : "–";
-    return `<tr>
-      <td title="${esc(d.filename)}">${esc(d.filename)}</td>
+    let detail;
+    if (d.status === "failed") {
+      detail = `<div class="reason">${esc(d.message || "未知错误")}</div>`;
+    } else if (d.status === "done") {
+      detail = `<span class="muted">${d.chunk_count} 个片段${d.ocr_pages ? ` · OCR ${d.ocr_pages} 页` : ""}</span>`;
+    } else if (d.status === "queued") {
+      detail = `<span class="muted">排队第 ${queue.indexOf(d.id) + 1} 位</span>`;
+    } else {
+      const pct = Math.round((d.progress || 0) * 100);
+      detail = `<div class="bar"><i style="width:${pct}%"></i></div><span class="muted">${pct}%${d.message ? ` · ${esc(d.message)}` : ""}</span>`;
+    }
+    const start = parseTime(d.started_at);
+    const end = parseTime(d.finished_at);
+    const dur = start && end ? fmtDur(end - start) : start && busy(d) ? `已用 ${fmtDur(now - start)}` : "–";
+    const pages = d.pages ? d.pages : "–";
+    return `<tr class="${cls}">
+      <td class="name" title="${esc(d.filename)}">${esc(d.filename)}</td>
+      <td class="num">${fmtSize(d.size)}</td>
       <td class="num">${pages}</td>
-      <td class="num">${d.chunk_count || "–"}</td>
-      <td><div class="status"><span class="label ${cls}">${STATUS[d.status] || d.status}</span>${bar}${msg}</div></td>
-      <td class="num">${esc((d.created_at || "").slice(0, 16))}</td>
+      <td><span class="label ${cls}">${STATUS[d.status] || esc(d.status)}</span></td>
+      <td class="detail">${detail}</td>
+      <td class="time">${fmtTime(d.created_at)}</td>
+      <td class="time">${fmtTime(d.finished_at)}</td>
+      <td class="num">${dur}</td>
       <td class="actions">
+        <a class="btn small" href="/api/documents/${d.id}/file" download>下载</a>
         <button class="btn small" data-reindex="${d.id}" ${busy(d) ? "disabled" : ""}>重新解析</button>
         <button class="btn small danger" data-del="${d.id}">删除</button>
       </td></tr>`;
-  }).join("") : `<tr><td colspan="6" class="hint">还没有文档，先上传几份吧</td></tr>`;
+  }).join("") : `<tr><td colspan="9" class="hint">${docs.length ? "没有符合条件的文件" : "还没有文件，点击上方上传"}</td></tr>`;
 }
 
 $("#docRows").addEventListener("click", async (e) => {
@@ -375,25 +510,33 @@ $("#docRows").addEventListener("click", async (e) => {
   refreshDocs();
 });
 
+$("#reindexAll").addEventListener("click", async () => {
+  if (!confirm("把所有已完成/失败的文件重新解析一遍？文件多时需要较长时间，期间原有结果仍可检索。")) return;
+  try {
+    const r = await api("/api/documents/reindex", { method: "POST" });
+    notice("ok", `已加入解析队列：${r.queued} 个文件`);
+  } catch (err) {
+    alert(`操作失败：${err.message}`);
+  }
+  refreshDocs();
+});
+
 // ------------------------------------------------------------------ 服务状态
 
 async function refreshHealth() {
   try {
     const h = await api("/api/health");
-    $("#health").innerHTML = [
-      [`MinerU`, h.mineru ? "up" : ""],
-      [`Embedding`, h.embedding ? "up" : ""],
-      [`重排`, h.reranker ? "up" : "off"],
-    ].map(([n, c]) => `<span class="${c}">${n}</span>`).join("");
-    $("#health").title = `已入库 ${h.documents} 份文档，${h.chunks} 个片段`;
+    const items = [["OCR（MinerU）", h.mineru ? "up" : ""]];
+    if (h.semantic) items.push(["Embedding", h.embedding ? "up" : ""]);
+    $("#health").innerHTML = items.map(([n, c]) => `<span class="${c}">${n}</span>`).join("");
+    $("#health").title = `已入库 ${h.documents} 份文档，${h.chunks} 个片段；OCR 服务只影响扫描件解析`;
   } catch {
     $("#health").innerHTML = `<span>服务未连接</span>`;
   }
 }
 
+showView(location.hash === "#library" ? "library" : "search");
 refreshDocs();
 refreshHealth();
 setInterval(refreshHealth, 30000);
-if (!$("#results").children.length) {
-  $("#results").innerHTML = `<li class="hint">输入关键字开始检索<br><small>按 / 快速聚焦搜索框；“精确”模式要求原文逐字包含</small></li>`;
-}
+$("#results").innerHTML = `<li class="hint">输入要查找的原文开始检索<br><small>原文必须逐字包含查询词；多个词用空格分隔。按 / 快速聚焦搜索框</small></li>`;

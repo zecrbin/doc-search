@@ -70,6 +70,10 @@ def remove_files(doc: dict):
             log.warning("删除文件失败 %s：%s", p, e)
 
 
+def _now() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
 class _Deleted(Exception):
     """处理过程中文档被删除。"""
 
@@ -98,7 +102,7 @@ def process(doc: dict):
     _update(doc_id, pdf_path=str(pdf))
 
     t0 = time.time()
-    blocks, pages, ocr_pages = parser.parse_pdf(pdf, progress("parsing", 0.05, 0.75))
+    blocks, pages, ocr_pages = parser.parse_pdf(pdf, progress("parsing", 0.05, 0.75 if config.SEMANTIC else 0.95))
     (config.PARSED_DIR / f"{doc_id}.json").write_text(
         json.dumps([asdict(b) for b in blocks], ensure_ascii=False), encoding="utf-8")
     chunks = chunker.build_chunks(blocks)
@@ -106,15 +110,17 @@ def process(doc: dict):
     if not chunks:
         raise RuntimeError("未提取到任何文字")
 
-    embed_cb = progress("embedding", 0.75, 0.98)
-    texts = [f"{c.heading}\n{c.text}" if c.heading else c.text for c in chunks]
-    vectors = []
-    step = config.EMBED_BATCH * 4
-    for i in range(0, len(texts), step):
-        embed_cb(i / len(texts), f"向量化 {i}/{len(texts)}")
-        vectors.extend(embedder.embed_documents(texts[i:i + step]))
-    if len(vectors) != len(chunks):
-        raise RuntimeError(f"Embedding 服务返回 {len(vectors)} 个向量，应为 {len(chunks)} 个")
+    vectors: list = [None] * len(chunks)
+    if config.SEMANTIC:
+        embed_cb = progress("embedding", 0.75, 0.98)
+        texts = [f"{c.heading}\n{c.text}" if c.heading else c.text for c in chunks]
+        vectors = []
+        step = config.EMBED_BATCH * 4
+        for i in range(0, len(texts), step):
+            embed_cb(i / len(texts), f"向量化 {i}/{len(texts)}")
+            vectors.extend(embedder.embed_documents(texts[i:i + step]))
+        if len(vectors) != len(chunks):
+            raise RuntimeError(f"Embedding 服务返回 {len(vectors)} 个向量，应为 {len(chunks)} 个")
 
     with db.session() as conn:
         db.delete_chunks(conn, doc_id)
@@ -128,11 +134,12 @@ def process(doc: dict):
             cid = cur.lastrowid
             conn.execute("INSERT INTO chunks_fts(rowid, tokens) VALUES (?, ?)",
                          (cid, textproc.index_tokens(f"{c.heading}\n{c.text}")))
-            conn.execute("INSERT INTO chunks_vec(rowid, embedding, doc_id) VALUES (?, ?, ?)",
-                         (cid, sqlite_vec.serialize_float32(vec), doc_id))
+            if vec is not None:
+                conn.execute("INSERT INTO chunks_vec(rowid, embedding, doc_id) VALUES (?, ?, ?)",
+                             (cid, sqlite_vec.serialize_float32(vec), doc_id))
         conn.execute(
             "UPDATE documents SET status='done', progress=1, message=NULL, pages=?, ocr_pages=?, chunk_count=?,"
-            " updated_at=datetime('now', 'localtime') WHERE id=?",
+            " updated_at=datetime('now', 'localtime'), finished_at=datetime('now', 'localtime') WHERE id=?",
             (pages, ocr_pages, len(chunks), doc_id),
         )
 
@@ -164,9 +171,10 @@ class Worker(threading.Thread):
             return
         doc = dict(row)
         try:
+            _update(doc["id"], started_at=_now(), finished_at=None)
             process(doc)
         except Exception as e:
-            if db.update_doc(doc["id"], status="failed", message=str(e)[:500]):
+            if db.update_doc(doc["id"], status="failed", message=str(e)[:500], finished_at=_now()):
                 log.exception("处理失败：%s", doc["filename"])
         with db.session() as conn:
             deleted = conn.execute("SELECT 1 FROM documents WHERE id=?", (doc["id"],)).fetchone() is None

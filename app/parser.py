@@ -162,6 +162,11 @@ def _extract_page(page: pymupdf.Page) -> list[_Raw]:
     for t in sorted(tables, key=lambda r: r.bbox[1]):
         idx = next((i for i, r in enumerate(out) if r.bbox[1] > t.bbox[1]), len(out))
         out.insert(idx, t)
+    # PyMuPDF 给的是未旋转页面的坐标，PDF.js 显示的是旋转后的页面（横向页常见），统一换成旋转后的
+    if page.rotation:
+        m = page.rotation_matrix
+        for r in out:
+            r.bbox = tuple(pymupdf.Rect(r.bbox) * m)
     return out
 
 

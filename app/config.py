@@ -33,6 +33,8 @@ EMBED_DIM = int(_env("EMBED_DIM", 1024))
 # 检索时查询向量化的超时（秒），入库时的批量向量化不受此限制
 EMBED_QUERY_TIMEOUT = float(_env("EMBED_QUERY_TIMEOUT", 5))
 RERANK_ENABLED = _env("RERANK", "1") == "1"
+# 语义检索（综合/语义模式）。默认关闭：只用精确匹配，入库不依赖 Embedding 服务
+SEMANTIC = _env("SEMANTIC", "0") == "1"
 
 CHUNK_TARGET = int(_env("CHUNK_TARGET", 500))
 CHUNK_MAX = int(_env("CHUNK_MAX", 800))

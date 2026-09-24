@@ -4,14 +4,15 @@ import time
 
 import sqlite_vec
 
-from . import db, embedder, textproc
+from . import config, db, embedder, textproc
 
 RRF_K = 60
 CANDIDATES = 100
-MODES = ("hybrid", "keyword", "semantic")
+KEYWORD_LIMIT = 1000  # 精确模式最多取多少个命中片段（折叠重复段落前）
+MODES = ("keyword", "hybrid", "semantic") if config.SEMANTIC else ("keyword",)
 
 
-def search(q: str, mode: str = "hybrid", top_k: int = 20, doc_id: int | None = None) -> dict:
+def search(q: str, mode: str = "keyword", top_k: int = 20, doc_id: int | None = None) -> dict:
     t0 = time.time()
     q = q.strip()
     tokens = textproc.query_tokens(q)
@@ -112,7 +113,7 @@ def _keyword(conn, terms: list[str], doc_id) -> list[int]:
     """
     if not terms:
         return []
-    args: dict = {"limit": CANDIDATES}
+    args: dict = {"limit": KEYWORD_LIMIT}
     where, counts = [], []
     for i, t in enumerate(terms):
         args[f"t{i}"] = t

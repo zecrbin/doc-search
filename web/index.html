@@ -9,22 +9,20 @@
 <body>
   <header class="topbar">
     <div class="brand">文档检索</div>
+    <nav class="tabs" id="tabs">
+      <button type="button" data-view="search" class="on">检索</button>
+      <button type="button" data-view="library">文件库 <span id="docCount" class="count">0</span><span id="busyCount" class="busy-count" hidden></span></button>
+    </nav>
     <div class="health" id="health" title="服务状态"></div>
-    <button class="btn" id="openLibrary">文档库 <span id="docCount" class="count"></span></button>
   </header>
 
-  <main class="layout">
+  <main class="layout" id="viewSearch">
     <aside class="search-pane">
       <form id="searchForm" class="search-box">
-        <input id="q" type="search" placeholder="输入关键字或问题，如：项目编号、付款方式、质保期" autocomplete="off" autofocus>
+        <input id="q" type="search" placeholder="输入要查找的原文，如：项目编号、质保期；多个词用空格分隔" autocomplete="off" autofocus>
         <button class="btn primary" type="submit">检索</button>
       </form>
       <div class="filters">
-        <div class="seg" id="mode" role="radiogroup">
-          <button type="button" data-mode="hybrid" class="on" title="关键字 + 语义融合">综合</button>
-          <button type="button" data-mode="keyword" title="原文逐字包含查询词（空格分隔多个词）">精确</button>
-          <button type="button" data-mode="semantic" title="只按语义相似度">语义</button>
-        </div>
         <select id="docFilter"><option value="">全部文档</option></select>
       </div>
       <div class="meta" id="meta"></div>
@@ -34,34 +32,46 @@
     <section class="viewer-pane">
       <div class="viewer-bar" id="viewerBar" hidden>
         <span class="viewer-title" id="viewerTitle"></span>
+        <span class="viewer-note" id="viewerNote" hidden></span>
+        <span class="viewer-hits" id="viewerHits"></span>
         <span class="viewer-page" id="viewerPage"></span>
         <a class="btn small" id="downloadOrig" href="#" download>下载原文</a>
       </div>
       <div class="pages" id="pages">
-        <div class="empty" id="viewerEmpty">
-          <p>点击左侧检索结果，在这里查看原文并定位高亮</p>
-        </div>
+        <div class="empty"><p>点击左侧检索结果，在这里查看原文并定位关键字</p></div>
       </div>
     </section>
   </main>
 
-  <dialog id="library">
-    <div class="lib-head">
-      <h2>文档库</h2>
-      <button class="btn small" id="closeLibrary">关闭</button>
+  <main class="library" id="viewLibrary" hidden>
+    <div class="lib-top">
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="fileInput" multiple accept=".pdf,.doc,.docx,.rtf" hidden>
+        <strong>上传文件：点击选择，或把文件拖到这里</strong>
+        <span>支持 PDF、Word（doc/docx）、RTF，可多选；扫描件会自动 OCR</span>
+      </label>
+      <div class="upload-panel" id="uploadPanel" hidden>
+        <div class="upload-line"><span id="uploadText"></span><span id="uploadPct"></span></div>
+        <div class="bar"><i id="uploadBar"></i></div>
+      </div>
+      <div class="notices" id="notices"></div>
     </div>
-    <label class="dropzone" id="dropzone">
-      <input type="file" id="fileInput" multiple accept=".pdf,.doc,.docx,.rtf" hidden>
-      <strong>点击选择文件或拖拽到这里</strong>
-      <span>支持 PDF、Word（doc/docx）、RTF，可多选；扫描件会自动 OCR</span>
-    </label>
+
+    <div class="lib-toolbar">
+      <div class="chips" id="statusFilter"></div>
+      <button class="btn small" id="reindexAll" title="改了行业词典、升级了解析程序后使用">全部重新解析</button>
+    </div>
+
     <div class="lib-table-wrap">
       <table class="lib-table">
-        <thead><tr><th>文件名</th><th>页数</th><th>片段</th><th>状态</th><th>入库时间</th><th></th></tr></thead>
+        <thead><tr>
+          <th>文件名</th><th class="num">大小</th><th class="num">页数</th><th>状态</th><th>进度 / 结果</th>
+          <th>上传时间</th><th>完成时间</th><th class="num">耗时</th><th></th>
+        </tr></thead>
         <tbody id="docRows"></tbody>
       </table>
     </div>
-  </dialog>
+  </main>
 
   <div class="drop-overlay" id="dropOverlay">松开即可上传</div>
   <script type="module" src="/static/app.js"></script>

@@ -21,7 +21,9 @@ CREATE TABLE IF NOT EXISTS documents(
   progress REAL DEFAULT 0,
   message TEXT,
   created_at TEXT DEFAULT (datetime('now', 'localtime')),
-  updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+  updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+  started_at TEXT,   -- 开始解析
+  finished_at TEXT   -- 解析完成或失败
 );
 CREATE TABLE IF NOT EXISTS chunks(
   id INTEGER PRIMARY KEY,
@@ -75,6 +77,11 @@ def init():
         d.mkdir(parents=True, exist_ok=True)
     with session() as conn:
         conn.executescript(SCHEMA)
+        # 旧库补列
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(documents)")}
+        for col in ("started_at", "finished_at"):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE documents ADD COLUMN {col} TEXT")
 
 
 def delete_chunks(conn: sqlite3.Connection, doc_id: int):

@@ -101,3 +101,61 @@ def test_delete_removes_files(tmp_path):
     assert client.delete(f"/api/documents/{doc['id']}").status_code == 200
     assert not parsed.exists() and not ingest.Path(doc["orig_path"]).exists()
     assert _status(doc["id"]) is None
+
+
+def _real_pdf(tmp_path):
+    import pymupdf
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((60, 100), "设备质保期限为两年，付款方式为银行转账。", fontname="china-s", fontsize=12)
+    path = tmp_path / "real.pdf"
+    doc.save(path)
+    return path
+
+
+def test_ingest_without_embedding_service(tmp_path, monkeypatch):
+    """默认不开语义检索：入库不调用 Embedding，记录开始/完成时间，精确检索和关键字定位可用。"""
+    from app import embedder, search
+
+    def must_not_call(*_):
+        raise AssertionError("不应调用 Embedding")
+    monkeypatch.setattr(embedder, "embed_documents", must_not_call)
+    doc = ingest.register_file(_real_pdf(tmp_path), "real.pdf")
+    ingest.Worker()._step()
+    with db.session() as conn:
+        row = dict(conn.execute("SELECT * FROM documents WHERE id=?", (doc["id"],)).fetchone())
+    assert row["status"] == "done", row["message"]
+    assert row["started_at"] and row["finished_at"] and row["started_at"] <= row["finished_at"]
+
+    res = search.search("质保期", "keyword")["results"]
+    assert len(res) == 1
+    client = TestClient(main.app)
+    hl = client.get(f"/api/chunks/{res[0]['chunk_id']}/highlights", params={"q": "质保期"}).json()
+    assert hl["exact"] and len(hl["boxes"]) == 1
+
+
+def test_failure_records_finish_time(tmp_path, monkeypatch):
+    doc = ingest.register_file(_src(tmp_path), "x.pdf")  # 不是合法 PDF
+    ingest.Worker()._step()
+    with db.session() as conn:
+        row = conn.execute("SELECT status, message, finished_at FROM documents WHERE id=?", (doc["id"],)).fetchone()
+    assert row["status"] == "failed" and row["message"] and row["finished_at"]
+
+
+def test_highlights_fall_back_to_paragraph():
+    from conftest import add_chunk
+    cid = add_chunk(add_doc(), "质保期三年")  # 没有 PDF 文件（相当于扫描页找不到文字层）
+    hl = TestClient(main.app).get(f"/api/chunks/{cid}/highlights", params={"q": "质保期"}).json()
+    assert hl == {"doc_id": hl["doc_id"], "boxes": [[0, 0, 0, 10, 10]], "exact": False}
+
+
+def test_reindex_all_and_old_db_migration():
+    busy, done = add_doc("a.pdf", "parsing"), add_doc("b.pdf", "failed")
+    r = TestClient(main.app).post("/api/documents/reindex").json()
+    assert r == {"queued": 1} and _status(busy) == "parsing" and _status(done) == "queued"
+    # 旧库没有时间列：init 时补上
+    with db.session() as conn:
+        conn.execute("ALTER TABLE documents DROP COLUMN finished_at")
+    db.init()
+    with db.session() as conn:
+        assert "finished_at" in {r[1] for r in conn.execute("PRAGMA table_info(documents)")}
