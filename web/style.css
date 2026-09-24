@@ -88,6 +88,7 @@ body { margin: 0; background: var(--bg); height: 100vh; display: flex; flex-dire
 .hit-none { padding: 8px 14px 10px; color: var(--muted); font-size: 12px; }
 .results mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1px; }
 .more { border: 0; background: none; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; padding: 2px 14px 10px; }
+.more[disabled] { color: var(--muted); cursor: default; }
 .hint { color: var(--muted); padding: 32px 16px; text-align: center; line-height: 1.8; }
 
 /* 原文预览 */

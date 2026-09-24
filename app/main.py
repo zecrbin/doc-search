@@ -118,13 +118,22 @@ def document_file(doc_id: int):
 
 @app.get("/api/search")
 def do_search(q: str = Query(..., min_length=1, max_length=500), mode: str = "keyword",
-              top_k: int = Query(100, ge=1, le=500), doc_id: int | None = None):
+              doc_id: int | None = None):
     if mode not in search.MODES:
         raise HTTPException(400, f"mode 只能是 {search.MODES}")
     try:
-        return search.search(q, mode, top_k, doc_id)
+        return search.search(q, mode, doc_id)
     except RuntimeError as e:  # embedding 服务不可用
         raise HTTPException(503, str(e))
+
+
+@app.get("/api/documents/{doc_id}/hits")
+def document_hits(doc_id: int, q: str = Query(..., min_length=1, max_length=500),
+                  offset: int = Query(0, ge=0), limit: int = Query(500, ge=1, le=2000)):
+    """一个文件里命中的段落，分页取（检索结果里每个文件只先带几段）。"""
+    with db.session() as conn:
+        _doc_or_404(conn, doc_id)
+    return search.document_hits(q, doc_id, offset, limit)
 
 
 @app.get("/api/documents/{doc_id}/highlights")
@@ -137,8 +146,8 @@ def document_highlights(doc_id: int, q: str = Query(..., min_length=1, max_lengt
     terms = search.terms_of(q)
     with db.session() as conn:
         doc = _doc_or_404(conn, doc_id)
-        ids = search._keyword(conn, terms, doc_id)
-        rows = search._load(conn, ids)
+        ids = [cid for cid, _, _ in search.keyword_matches(conn, terms, doc_id)]
+        rows = search.load_chunks(conn, ids)
     chunks = [(cid, json.loads(rows[cid]["regions"])) for cid in ids if cid in rows]
     per_chunk = [[] for _ in chunks]
     ocr_lines = {}

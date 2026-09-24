@@ -64,3 +64,45 @@ def test_ids_that_disappear_mid_search_are_skipped(monkeypatch):
     # 模拟 FTS/向量查询之后、加载片段之前该片段被删除
     monkeypatch.setattr(search, "_vector", lambda *a: [987654, cid])
     assert chunk_ids(search.search("付款方式", "hybrid")) == [cid]
+
+
+def _bulk(doc_id: int, texts: list[str]):
+    from app import db
+    with db.session() as conn:
+        conn.executemany(
+            "INSERT INTO chunks(doc_id, seq, kind, heading, text, text_hash, page_start, regions)"
+            " VALUES (?, ?, 'text', '', ?, '', ?, '[[0, 0, 0, 10, 10]]')",
+            [(doc_id, i, t, i // 10) for i, t in enumerate(texts)])
+
+
+def test_no_truncation_and_paged_expansion():
+    """命中远超原来的 2000 段上限：文件、段数、次数都完整统计，展开能分页取到每一段。"""
+    from fastapi.testclient import TestClient
+    from app import main
+    big = add_doc("大文件.pdf")
+    _bulk(big, [f"第{i}段：项目编号 X{i}" + ("，项目" if i % 2 else "") for i in range(2600)])
+    small = [add_doc(f"小文件{i}.pdf") for i in range(300)]
+    for d in small:
+        _bulk(d, ["本项目的付款方式"])
+    add_chunk(add_doc("无关.pdf"), "付款方式")
+
+    data = search.search("项目")
+    assert data["total_docs"] == 301
+    assert data["total_chunks"] == 2600 + 300
+    assert data["total_hits"] == 2600 + 1300 + 300
+    first = data["docs"][0]
+    assert (first["filename"], first["chunk_count"], first["hit_count"], len(first["chunks"])) == \
+        ("大文件.pdf", 2600, 3900, search.PREVIEW)
+
+    client = TestClient(main.app)
+    got, offset = [], 0
+    while True:
+        page = client.get(f"/api/documents/{big}/hits", params={"q": "项目", "offset": offset, "limit": 1000}).json()
+        assert page["total"] == 2600
+        if not page["chunks"]:
+            break
+        got += page["chunks"]
+        offset += len(page["chunks"])
+    assert len(got) == 2600 and len({c["chunk_id"] for c in got}) == 2600
+    assert [c["page"] for c in got] == sorted(c["page"] for c in got)  # 按页码排列
+    assert sum(c["count"] for c in got) == 3900

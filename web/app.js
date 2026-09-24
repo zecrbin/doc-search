@@ -39,7 +39,7 @@ $("#tabs").addEventListener("click", (e) => {
 
 // ------------------------------------------------------------------ 检索
 
-const SHOW_HITS = 5; // 每个文件默认列出几段命中，其余折叠
+const MORE_PAGE = 500; // 展开时每次向后端取多少段
 const state = { data: null, active: null, docs: [], filter: "all" };
 
 $("#searchForm").addEventListener("submit", (e) => { e.preventDefault(); runSearch(); });
@@ -60,14 +60,11 @@ async function runSearch() {
   if (!q) return;
   $("#meta").textContent = "检索中…";
   try {
-    const data = await api(`/api/search?${new URLSearchParams({ q, mode: "keyword", top_k: 200 })}`);
+    const data = await api(`/api/search?${new URLSearchParams({ q, mode: "keyword" })}`);
     state.data = data;
     state.active = null;
-    const notes = [];
-    if (data.truncated) notes.push("命中太多，只统计了前 2000 段，可以多加一个词缩小范围");
-    if (data.docs.length < data.total_docs) notes.push(`只列出前 ${data.docs.length} 个文件`);
     $("#meta").textContent = data.total_docs
-      ? `${data.total_docs} 个文件 · 共 ${data.total_hits} 处 · ${data.took_ms} ms${notes.length ? `（${notes.join("；")}）` : ""}`
+      ? `${data.total_docs} 个文件 · ${data.total_chunks} 段 · 共 ${data.total_hits} 处 · ${data.took_ms} ms`
       : "";
     renderResults(data);
   } catch (err) {
@@ -101,35 +98,65 @@ function renderResults(data) {
   }
   const hl = highlighter(data.terms);
   ol.innerHTML = data.docs.map((d, i) => {
-    const hits = d.chunks.map((c, j) => {
-      const where = c.pages.length > 1 ? `第 ${c.pages[0]}–${c.pages.at(-1)} 页` : `第 ${c.page} 页`;
-      return `<li class="hit" data-chunk="${c.chunk_id}" ${j >= SHOW_HITS ? "hidden" : ""}>
-        <div class="hit-meta"><span class="hit-page">${where}</span>${c.kind === "table" ? '<span class="tag table">表格</span>' : ""}
-          ${c.heading ? `<span class="hit-heading" title="${esc(c.heading)}">${esc(c.heading)}</span>` : ""}
-          ${c.count > 1 ? `<span class="hit-n">本段 ${c.count} 处</span>` : ""}</div>
-        <div class="hit-text">${hl(snippet(c.text, data.terms))}</div>
-        <div class="hit-full">${hl(c.text)}</div>
-      </li>`;
-    }).join("");
-    const more = d.chunks.length > SHOW_HITS ? `<button class="more" type="button">还有 ${d.chunks.length - SHOW_HITS} 段命中，展开</button>` : "";
+    const rest = d.chunk_count - d.chunks.length;
+    const more = rest > 0 ? `<button class="more" type="button">还有 ${rest} 段命中，展开</button>` : "";
     return `<li class="doc" data-idx="${i}">
       <div class="doc-head">
         <span class="doc-name" title="${esc(d.filename)}">${hl(d.filename)}</span>
         ${d.filename_match ? '<span class="tag name">文件名命中</span>' : ""}
-        <span class="doc-count">${d.hit_count ? `${d.hit_count} 处` : ""}</span>
+        <span class="doc-count">${d.hit_count ? `${d.chunk_count} 段 · ${d.hit_count} 处` : ""}</span>
       </div>
-      ${d.chunks.length ? `<ol class="hits">${hits}</ol>${more}` : '<div class="hit-none">正文里没有查询词，只有文件名命中</div>'}
+      ${d.chunks.length ? `<ol class="hits">${d.chunks.map((c) => hitHtml(c, hl, data.terms)).join("")}</ol>${more}`
+        : '<div class="hit-none">正文里没有查询词，只有文件名命中</div>'}
     </li>`;
   }).join("");
+}
+
+function hitHtml(c, hl, terms) {
+  const where = c.pages.length > 1 ? `第 ${c.pages[0]}–${c.pages.at(-1)} 页` : `第 ${c.page} 页`;
+  return `<li class="hit" data-chunk="${c.chunk_id}">
+    <div class="hit-meta"><span class="hit-page">${where}</span>${c.kind === "table" ? '<span class="tag table">表格</span>' : ""}
+      ${c.heading ? `<span class="hit-heading" title="${esc(c.heading)}">${esc(c.heading)}</span>` : ""}
+      ${c.count > 1 ? `<span class="hit-n">本段 ${c.count} 处</span>` : ""}</div>
+    <div class="hit-text">${hl(snippet(c.text, terms))}</div>
+    <div class="hit-full">${hl(c.text)}</div>
+  </li>`;
+}
+
+// 展开：从后端接着取这个文件剩下的段落，一次 MORE_PAGE 段，直到取完
+async function loadMore(idx, btn) {
+  const data = state.data;
+  const d = data.docs[idx];
+  btn.disabled = true;
+  btn.textContent = "加载中…";
+  try {
+    const res = await api(`/api/documents/${d.doc_id}/hits?${new URLSearchParams({ q: data.query, offset: d.chunks.length, limit: MORE_PAGE })}`);
+    if (state.data !== data) return; // 期间又检索了别的
+    d.chunks.push(...res.chunks);
+    d.chunk_count = res.total;
+    const hl = highlighter(data.terms);
+    btn.previousElementSibling.insertAdjacentHTML("beforeend", res.chunks.map((c) => hitHtml(c, hl, data.terms)).join(""));
+    const rest = res.total - d.chunks.length;
+    if (rest > 0 && res.chunks.length) {
+      btn.disabled = false;
+      btn.textContent = `还有 ${rest} 段命中，继续展开`;
+    } else {
+      btn.remove();
+    }
+    if (state.active === idx && viewer.cur >= 0) markCurrent(); // 新加载的段落里可能有正在看的那段
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = `加载失败（${err.message}），点击重试`;
+  }
 }
 
 $("#results").addEventListener("click", (e) => {
   const li = e.target.closest(".doc");
   if (!li) return;
   const idx = +li.dataset.idx;
-  if (e.target.closest(".more")) {
-    li.querySelectorAll(".hit[hidden]").forEach((h) => { h.hidden = false; });
-    e.target.remove();
+  const moreBtn = e.target.closest(".more");
+  if (moreBtn) {
+    loadMore(idx, moreBtn);
     return;
   }
   const hit = e.target.closest(".hit");
@@ -235,16 +262,18 @@ function goTo(i) {
   const p = viewer.pages[pg];
   if (p) pagesEl.scrollTo({ top: p.el.offsetTop + y0 * p.scale - pagesEl.clientHeight / 3, behavior: "smooth" });
   updateHitNav();
-  // 左侧同步标出正在看的段落
+  markCurrent(true);
+}
+
+// 左侧同步标出正在看的段落（还没展开加载的段落标不到，右侧照常跳转）
+function markCurrent(scroll = false) {
+  const h = viewer.hits[viewer.cur];
   const card = document.querySelector(`#results .doc[data-idx="${state.active}"]`);
   card?.querySelectorAll(".hit").forEach((el) => {
-    const on = +el.dataset.chunk === h.chunk_id;
+    const on = +el.dataset.chunk === h?.chunk_id;
     el.classList.toggle("current", on);
     if (!on) el.classList.remove("expanded");
-    if (on) {
-      el.hidden = false;
-      el.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    }
+    if (on && scroll) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
   });
 }
 
