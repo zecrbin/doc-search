@@ -12,7 +12,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, db, embedder, highlight, ingest, search, textproc
+from . import config, db, embedder, highlight, ingest, llm, search, summary, textproc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -24,6 +24,7 @@ async def lifespan(_: FastAPI):
     db.init()
     textproc.init()
     ingest.worker.start()
+    summary.worker.start()
     yield
 
 
@@ -83,7 +84,7 @@ def list_documents(page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, 
         total = conn.execute(f"SELECT count(*) FROM documents WHERE {where}", args).fetchone()[0]
         items = [dict(r) for r in conn.execute(
             "SELECT id, filename, ext, size, pages, ocr_pages, chunk_count, status, progress, message,"
-            " created_at, updated_at, started_at, finished_at,"
+            " created_at, updated_at, started_at, finished_at, summary_status, summary_message,"
             # 排队位置：后台按 id 从小到大处理
             " CASE WHEN status='queued' THEN (SELECT count(*) FROM documents q WHERE q.status='queued' AND q.id <= documents.id)"
             " END AS queue_pos"
@@ -162,6 +163,28 @@ def reindex(doc_id: int):
             raise HTTPException(409, "文档正在处理中")
     ingest.worker.wake.set()
     return {"ok": True}
+
+
+@app.get("/api/documents/{doc_id}/summary")
+def document_summary(doc_id: int):
+    """大模型生成的服务内容概述。status：null 未生成 / queued / running / done / failed。"""
+    with db.session() as conn:
+        doc = _doc_or_404(conn, doc_id)
+    return {"doc_id": doc_id, "filename": doc["filename"], "doc_status": doc["status"], "llm": llm.enabled(),
+            "status": doc["summary_status"], "summary": doc["summary"], "message": doc["summary_message"],
+            "summary_at": doc["summary_at"]}
+
+
+@app.post("/api/documents/summarize")
+def summarize_documents(ids: list[int] = Body(..., embed=True, max_length=100000)):
+    """（重新）生成概述。只处理已解析完成的文档，正在生成的不重复排队。"""
+    if not llm.enabled():
+        raise HTTPException(400, "没有配置大模型（DOCSEARCH_LLM_URL），无法生成概述")
+    with db.session() as conn:
+        n = sum(summary.queue(conn, "id=? AND coalesce(summary_status, '') NOT IN ('queued', 'running')", (i,))
+                for i in dict.fromkeys(ids))
+    summary.worker.wake.set()
+    return {"queued": n}
 
 
 @app.get("/api/documents/{doc_id}/pdf")
@@ -259,7 +282,8 @@ def health():
         stats = conn.execute(
             "SELECT (SELECT count(*) FROM documents WHERE status='done'), (SELECT count(*) FROM chunks)").fetchone()
     emb = embedder.health() if config.SEMANTIC else {}
-    return {"mineru": mineru, "semantic": config.SEMANTIC, **emb, "documents": stats[0], "chunks": stats[1]}
+    return {"mineru": mineru, "semantic": config.SEMANTIC, **emb, "llm": llm.health(),
+            "documents": stats[0], "chunks": stats[1]}
 
 
 app.mount("/static", StaticFiles(directory=config.WEB_DIR), name="static")

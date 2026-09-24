@@ -708,7 +708,8 @@ async function refreshDocs() {
   }
   lib.data = data;
   renderDocs();
-  pollTimer = setTimeout(refreshDocs, data.overall.busy ? 2000 : 15000);
+  const summarizing = data.items.some((d) => d.summary_status === "queued" || d.summary_status === "running");
+  pollTimer = setTimeout(refreshDocs, data.overall.busy ? 2000 : summarizing ? 4000 : 15000);
 }
 
 function resetList() {
@@ -769,6 +770,7 @@ function renderDocs() {
       <td class="time">${fmtTime(d.finished_at)}</td>
       <td class="num">${dur}</td>
       <td class="actions">
+        ${summaryButton(d)}
         <a class="btn small" href="/api/documents/${d.id}/file" download>下载</a>
         <button class="btn small" data-reindex="${d.id}" ${busy(d) ? "disabled" : ""}>重新解析</button>
         <button class="btn small danger" data-del="${d.id}">删除</button>
@@ -958,6 +960,135 @@ $("#reindexAll").addEventListener("click", async () => {
   refreshDocs();
 });
 
+// ------------------------------------------------------------------ 文档概述（大模型）
+
+let llmEnabled = false;
+const SUMMARY_LABEL = { queued: "概述排队中", running: "概述生成中", failed: "概述失败", done: "概述" };
+
+function summaryButton(d) {
+  if (d.status !== "done" || (!llmEnabled && d.summary_status !== "done")) return "";
+  const st = d.summary_status;
+  const cls = st === "failed" ? " danger" : st === "queued" || st === "running" ? " pending" : "";
+  const title = st === "failed" ? d.summary_message || "" : st === "running" ? d.summary_message || "" : "";
+  return `<button class="btn small${cls}" data-summary="${d.id}" title="${esc(title)}">${SUMMARY_LABEL[st] || "生成概述"}</button>`;
+}
+
+// 极简 Markdown：标题、列表、加粗；先转义，不会注入 HTML
+function renderMarkdown(md) {
+  const inline = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  const out = [];
+  let list = null;
+  const close = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const raw of md.split("\n")) {
+    const line = raw.trim();
+    let m;
+    if (!line) { close(); continue; }
+    if ((m = line.match(/^#{1,6}\s+(.*)$/))) { close(); out.push(`<h3>${inline(m[1])}</h3>`); continue; }
+    if ((m = line.match(/^(?:[-*•·]|\d+[.、)])\s*(.*)$/))) {
+      const tag = /^\d/.test(line) ? "ol" : "ul";
+      if (list !== tag) { close(); out.push(`<${tag}>`); list = tag; }
+      out.push(`<li>${inline(m[1])}</li>`);
+      continue;
+    }
+    close();
+    out.push(`<p>${inline(line)}</p>`);
+  }
+  close();
+  return out.join("");
+}
+
+const sumDlg = { docId: null, timer: null, text: "" };
+
+async function openSummary(docId) {
+  sumDlg.docId = docId;
+  sumDlg.text = "";
+  $("#sumBody").innerHTML = "";
+  $("#sumStatus").textContent = "加载中…";
+  if (!$("#summaryDlg").open) $("#summaryDlg").showModal();
+  await loadSummary();
+}
+
+async function loadSummary() {
+  clearTimeout(sumDlg.timer);
+  const docId = sumDlg.docId;
+  let r;
+  try {
+    r = await api(`/api/documents/${docId}/summary`);
+  } catch (err) {
+    $("#sumStatus").textContent = `加载失败：${err.message}`;
+    return;
+  }
+  if (docId !== sumDlg.docId || !$("#summaryDlg").open) return;
+  $("#sumFile").textContent = r.filename;
+  $("#sumFile").title = r.filename;
+  const status = $("#sumStatus");
+  status.className = "sum-status";
+  const busyNow = r.status === "queued" || r.status === "running";
+  if (!r.llm && r.status !== "done") {
+    status.textContent = "没有配置大模型（DOCSEARCH_LLM_URL），无法生成概述";
+  } else if (r.doc_status !== "done") {
+    status.textContent = "文件还在解析，解析完成后自动生成概述";
+  } else if (r.status === "queued") {
+    status.textContent = r.summary ? "文件已重新解析，正在排队重新生成（下面是上一次的概述）" : "排队中，前面的文件生成完就开始";
+  } else if (r.status === "running") {
+    status.textContent = `正在生成：${r.message || ""}（长文档可能需要几分钟）`;
+  } else if (r.status === "failed") {
+    status.className = "sum-status bad";
+    status.textContent = `生成失败：${r.message || "未知错误"}`;
+  } else if (r.status === "done") {
+    status.textContent = `生成于 ${r.summary_at}`;
+  } else {
+    status.textContent = "还没有生成概述，点击下方“重新生成”开始";
+  }
+  sumDlg.text = r.summary || "";
+  $("#sumBody").innerHTML = r.summary ? renderMarkdown(r.summary) : "";
+  $("#sumRegen").hidden = !r.llm || r.doc_status !== "done";
+  $("#sumRegen").disabled = busyNow;
+  $("#sumCopy").disabled = !r.summary;
+  if (busyNow || r.doc_status !== "done") sumDlg.timer = setTimeout(loadSummary, 3000);
+}
+
+$("#sumClose").addEventListener("click", () => $("#summaryDlg").close());
+$("#summaryDlg").addEventListener("close", () => { clearTimeout(sumDlg.timer); sumDlg.docId = null; });
+$("#sumRegen").addEventListener("click", async () => {
+  try {
+    await api("/api/documents/summarize", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: [sumDlg.docId] }),
+    });
+  } catch (err) {
+    alert(`操作失败：${err.message}`);
+  }
+  loadSummary();
+  if (!$("#viewLibrary").hidden) refreshDocs();
+});
+$("#sumCopy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(sumDlg.text);
+    $("#sumCopy").textContent = "已复制";
+  } catch {
+    // 非 https 页面没有剪贴板权限：选中文字让用户手动复制
+    getSelection().selectAllChildren($("#sumBody"));
+    $("#sumCopy").textContent = "已选中，按 Ctrl+C 复制";
+  }
+  setTimeout(() => { $("#sumCopy").textContent = "复制"; }, 2000);
+});
+$("#viewerSummary").addEventListener("click", () => viewer.docId !== null && openSummary(viewer.docId));
+$("#docRows").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-summary]");
+  if (b) openSummary(+b.dataset.summary);
+});
+$("#selSummarize").addEventListener("click", async () => {
+  const ids = [...lib.selected];
+  await withBusy($("#selSummarize"), "提交中…", async () => {
+    const r = await api("/api/documents/summarize", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }),
+    });
+    const skipped = ids.length - r.queued;
+    notice("ok", `已加入概述队列：${r.queued} 个文件${skipped ? `（${skipped} 个未解析完成或正在生成，已跳过）` : ""}`);
+    lib.selected.clear();
+  });
+});
+
 // ------------------------------------------------------------------ 服务状态
 
 async function refreshHealth() {
@@ -965,6 +1096,12 @@ async function refreshHealth() {
     const h = await api("/api/health");
     const items = [["OCR（MinerU）", h.mineru ? "up" : ""]];
     if (h.semantic) items.push(["Embedding", h.embedding ? "up" : ""]);
+    if (h.llm.enabled) items.push([`大模型${h.llm.model ? `（${h.llm.model}）` : ""}`, h.llm.up ? "up" : ""]);
+    if (llmEnabled !== h.llm.enabled) {
+      llmEnabled = h.llm.enabled;
+      document.querySelectorAll("[data-llm]").forEach((el) => { el.hidden = !llmEnabled; });
+      if (lib.data) renderDocs(); // 文件库可能先于服务状态加载，补上"概述"按钮
+    }
     $("#health").innerHTML = items.map(([n, c]) => `<span class="${c}">${n}</span>`).join("");
     $("#health").title = `已入库 ${h.documents} 份文档，${h.chunks} 个片段；OCR 服务只影响扫描件解析`;
   } catch {

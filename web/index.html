@@ -40,6 +40,7 @@
           <button class="btn small" id="nextHit" title="下一处（F3）">下一处 ›</button>
         </span>
         <span class="viewer-page" id="viewerPage"></span>
+        <button class="btn small" id="viewerSummary" title="大模型生成的服务内容概述" data-llm hidden>概述</button>
         <a class="btn small" id="downloadOrig" href="#" download>下载原文</a>
       </div>
       <div class="pages" id="pages">
@@ -72,6 +73,7 @@
       <span id="selText"></span>
       <button class="link" id="selAll" hidden></button>
       <span class="spacer"></span>
+      <button class="btn small" id="selSummarize" data-llm hidden>生成概述</button>
       <button class="btn small" id="selReindex">重新解析</button>
       <button class="btn small danger" id="selDelete">删除</button>
       <button class="btn small" id="selClear">取消选择</button>
@@ -89,6 +91,21 @@
     </div>
     <div class="pager" id="pager"></div>
   </main>
+
+  <dialog id="summaryDlg" class="summary-dlg">
+    <div class="sum-head">
+      <div class="sum-title"><h2>服务内容概述</h2><span id="sumFile"></span></div>
+      <button class="btn small" id="sumClose">关闭</button>
+    </div>
+    <div class="sum-status" id="sumStatus"></div>
+    <div class="sum-body" id="sumBody"></div>
+    <div class="sum-foot">
+      <span class="muted">由大模型根据原文生成，指标数值请以原文为准</span>
+      <span class="spacer"></span>
+      <button class="btn small" id="sumCopy">复制</button>
+      <button class="btn small" id="sumRegen">重新生成</button>
+    </div>
+  </dialog>
 
   <div class="drop-overlay" id="dropOverlay">松开即可上传</div>
   <script type="module" src="/static/app.js"></script>
