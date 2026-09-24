@@ -19,7 +19,11 @@
   <main class="layout" id="viewSearch">
     <aside class="search-pane">
       <form id="searchForm" class="search-box">
-        <input id="q" type="search" placeholder="在全部文件的正文和文件名里查找，如：项目编号、质保期" autocomplete="off" autofocus>
+        <div class="q-wrap">
+          <input id="q" type="search" placeholder="在全部文件的正文和文件名里查找，如：项目编号、质保期" autocomplete="off" autofocus>
+          <button type="button" class="q-clear" id="qClear" title="清除搜索（Esc）" hidden>×</button>
+          <div class="history" id="history" hidden></div>
+        </div>
         <button class="btn primary" type="submit">检索</button>
       </form>
       <div class="meta" id="meta"></div>

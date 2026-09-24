@@ -42,7 +42,106 @@ $("#tabs").addEventListener("click", (e) => {
 const MORE_PAGE = 500; // 展开时每次向后端取多少段
 const state = { data: null, active: null };
 
-$("#searchForm").addEventListener("submit", (e) => { e.preventDefault(); runSearch(); });
+$("#searchForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const pick = history_.items[history_.sel];
+  if (history_.open && pick !== undefined) $("#q").value = pick; // 方向键选中了历史记录
+  hideHistory();
+  runSearch();
+});
+
+const HINT = `<li class="hint">输入要查找的原文开始检索<br><small>在全部文件的正文和文件名里逐字查找；多个词用空格分隔。<br>按 / 聚焦搜索框，Esc 清除搜索，F3 / Shift+F3 在原文里跳到下一处 / 上一处</small></li>`;
+
+function clearSearch() {
+  $("#q").value = "";
+  state.data = null;
+  state.active = null;
+  $("#meta").textContent = "";
+  $("#results").innerHTML = HINT;
+  $("#qClear").hidden = true;
+  closeViewer("点击左侧检索结果，在这里查看原文并定位关键字");
+  $("#q").focus();
+}
+$("#qClear").addEventListener("click", clearSearch);
+
+// ---- 搜索历史：存在各自浏览器里，最多 30 条，最近的在前
+const HISTORY_KEY = "searchHistory";
+const HISTORY_MAX = 30;
+const history_ = { items: [], sel: -1, open: false };
+
+function loadHistory() {
+  try { return JSON.parse(localStorage.getItem(HISTORY_KEY)) || []; } catch { return []; }
+}
+function saveHistory(list) {
+  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(list)); } catch {}
+}
+function addHistory(q) {
+  saveHistory([q, ...loadHistory().filter((x) => x !== q)].slice(0, HISTORY_MAX));
+}
+
+function showHistory() {
+  const typed = $("#q").value.trim().toLowerCase();
+  history_.items = loadHistory().filter((h) => !typed || (h.toLowerCase().includes(typed) && h.toLowerCase() !== typed));
+  history_.sel = -1;
+  history_.open = history_.items.length > 0;
+  const box = $("#history");
+  box.hidden = !history_.open;
+  if (!history_.open) return;
+  const hl = highlighter(typed ? [typed] : []);
+  box.innerHTML = `<div class="history-head"><span>搜索历史</span><button type="button" class="link" data-clear-all>清空</button></div>` +
+    history_.items.map((h, i) => `<div class="history-item" data-i="${i}"><span class="history-text">${hl(h)}</span>` +
+      `<button type="button" class="history-del" data-del="${i}" title="删除这条">×</button></div>`).join("");
+}
+function hideHistory() {
+  history_.open = false;
+  history_.sel = -1;
+  $("#history").hidden = true;
+}
+function moveHistory(delta) {
+  if (!history_.open) return showHistory();
+  // 在 -1（不选，用输入框里的内容）和 0..n-1 之间循环
+  const n = history_.items.length;
+  history_.sel += delta;
+  if (history_.sel >= n) history_.sel = -1;
+  else if (history_.sel < -1) history_.sel = n - 1;
+  document.querySelectorAll("#history .history-item").forEach((el) => el.classList.toggle("sel", +el.dataset.i === history_.sel));
+}
+
+$("#q").addEventListener("focus", showHistory);
+$("#q").addEventListener("input", () => { $("#qClear").hidden = !$("#q").value; showHistory(); });
+$("#q").addEventListener("blur", () => setTimeout(hideHistory, 150));
+$("#q").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    moveHistory(e.key === "ArrowDown" ? 1 : -1);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    if (history_.open) hideHistory();
+    else clearSearch();
+  }
+});
+// 点历史记录时不让输入框失焦，否则 blur 先把列表关掉
+$("#history").addEventListener("mousedown", (e) => e.preventDefault());
+$("#history").addEventListener("click", (e) => {
+  const del = e.target.closest("[data-del]");
+  if (del) {
+    const h = history_.items[+del.dataset.del];
+    saveHistory(loadHistory().filter((x) => x !== h));
+    showHistory();
+    return;
+  }
+  if (e.target.closest("[data-clear-all]")) {
+    saveHistory([]);
+    hideHistory();
+    return;
+  }
+  const item = e.target.closest(".history-item");
+  if (!item) return;
+  $("#q").value = history_.items[+item.dataset.i];
+  $("#qClear").hidden = false;
+  hideHistory();
+  runSearch();
+});
 document.addEventListener("keydown", (e) => {
   const typing = ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName);
   if (e.key === "/" && !typing) {
@@ -61,12 +160,19 @@ async function runSearch() {
   $("#meta").textContent = "检索中…";
   try {
     const data = await api(`/api/search?${new URLSearchParams({ q, mode: "keyword" })}`);
+    addHistory(q);
     state.data = data;
     state.active = null;
     $("#meta").textContent = data.total_docs
       ? `${data.total_docs} 个文件 · ${data.total_chunks} 段 · 共 ${data.total_hits} 处 · ${data.took_ms} ms`
       : "";
     renderResults(data);
+    // 右侧还开着上一次检索的文件：在新结果里就按新查询词重新高亮，不在就关掉，免得看到旧的高亮
+    if (viewer.docId !== null) {
+      const idx = data.docs.findIndex((d) => d.doc_id === viewer.docId);
+      if (idx >= 0) openDoc(idx, null);
+      else closeViewer("点击左侧检索结果，在这里查看原文并定位关键字");
+    }
   } catch (err) {
     $("#meta").textContent = "";
     $("#results").innerHTML = `<li class="hint">检索失败：${esc(err.message)}</li>`;
@@ -190,6 +296,7 @@ async function openDoc(idx, chunkId) {
     goTo(i >= 0 ? i : 0);
     return;
   }
+  markCurrent(); // 先清掉上一个文件里标着的段落，新文件的命中加载完再标
   $("#viewerBar").hidden = false;
   $("#viewerTitle").textContent = d.filename;
   $("#viewerTitle").title = d.filename;
@@ -227,6 +334,7 @@ async function openDoc(idx, chunkId) {
 function setHits(hits) {
   viewer.hits = hits;
   viewer.cur = -1;
+  viewer.hitsQuery = null;
   drawHits();
   updateHitNav();
 }
@@ -268,9 +376,8 @@ function goTo(i) {
 // 左侧同步标出正在看的段落（还没展开加载的段落标不到，右侧照常跳转）
 function markCurrent(scroll = false) {
   const h = viewer.hits[viewer.cur];
-  const card = document.querySelector(`#results .doc[data-idx="${state.active}"]`);
-  card?.querySelectorAll(".hit").forEach((el) => {
-    const on = +el.dataset.chunk === h?.chunk_id;
+  document.querySelectorAll("#results .hit").forEach((el) => {
+    const on = +el.closest(".doc").dataset.idx === state.active && +el.dataset.chunk === h?.chunk_id;
     el.classList.toggle("current", on);
     if (!on) el.classList.remove("expanded");
     if (on && scroll) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -377,6 +484,17 @@ function releasePage(p) {
   p.task?.cancel();
   p.canvas?.remove();
   Object.assign(p, { rendered: false, task: null, canvas: null });
+}
+
+function closeViewer(message) {
+  viewer.token++;
+  viewer.hlToken++;
+  viewer.observer?.disconnect();
+  viewer.pdf?.destroy();
+  Object.assign(viewer, { pdf: null, docId: null, pages: [] });
+  setHits([]);
+  pagesEl.innerHTML = `<div class="empty"><p>${esc(message)}</p></div>`;
+  $("#viewerBar").hidden = true;
 }
 
 function updatePageIndicator() {
@@ -708,15 +826,7 @@ async function withBusy(btn, text, fn) {
 function afterDelete(ids) {
   const gone = new Set(ids.map(Number));
   gone.forEach((id) => lib.selected.delete(id));
-  if (gone.has(viewer.docId)) {
-    viewer.token++;
-    viewer.hlToken++;
-    viewer.pdf?.destroy();
-    Object.assign(viewer, { pdf: null, docId: null, pages: [] });
-    setHits([]);
-    pagesEl.innerHTML = `<div class="empty">文档已删除</div>`;
-    $("#viewerBar").hidden = true;
-  }
+  if (gone.has(viewer.docId)) closeViewer("文档已删除");
   if (state.data?.docs.some((d) => gone.has(d.doc_id))) runSearch();
 }
 
@@ -775,4 +885,4 @@ showView(location.hash === "#library" ? "library" : "search");
 refreshDocs();
 refreshHealth();
 setInterval(refreshHealth, 30000);
-$("#results").innerHTML = `<li class="hint">输入要查找的原文开始检索<br><small>在全部文件的正文和文件名里逐字查找；多个词用空格分隔。<br>按 / 聚焦搜索框，F3 / Shift+F3 在原文里跳到下一处 / 上一处</small></li>`;
+$("#results").innerHTML = HINT;
