@@ -42,7 +42,8 @@ LLM_URL = _env("LLM_URL", "").rstrip("/")
 LLM_MODEL = _env("LLM_MODEL", "")  # 留空则用接口 /models 返回的第一个模型
 LLM_API_KEY = _env("LLM_API_KEY", "")
 LLM_TIMEOUT = float(_env("LLM_TIMEOUT", 600))  # 单次调用超时（秒），量化模型在长文本上可能要几分钟
-LLM_CHUNK_CHARS = int(_env("LLM_CHUNK_CHARS", 12000))  # 每次送给大模型的原文字数，按模型上下文长度调
+# 每次送给大模型的原文字数。0 = 自动：按接口报告的上下文长度计算（llama.cpp 的 /props、vLLM 的 /models），取不到时用 12000
+LLM_CHUNK_CHARS = int(_env("LLM_CHUNK_CHARS", 0))
 LLM_MAX_TOKENS = int(_env("LLM_MAX_TOKENS", 2048))  # 每次最多生成多少 token
 LLM_NO_THINK = _env("LLM_NO_THINK", "1") == "1"  # Qwen3 等思考模型关闭思考，快很多
 

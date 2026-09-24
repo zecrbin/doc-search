@@ -16,10 +16,10 @@ services:
       # MinerU 就在本机时写本机局域网 IP，不能写 127.0.0.1（容器里的 127.0.0.1 是容器自己）
       # 文档概述：大模型的 OpenAI 兼容接口地址（vLLM / Ollama / LMDeploy 等），不配置则不生成概述
       # 大模型在本机时同样写本机局域网 IP；模型名留空自动取接口返回的第一个
-      # DOCSEARCH_LLM_URL: http://192.168.18.61:8000/v1
+      # DOCSEARCH_LLM_URL: http://192.168.18.61:8001/v1
       # DOCSEARCH_LLM_MODEL: ""
       # DOCSEARCH_LLM_API_KEY: ""
-      # DOCSEARCH_LLM_CHUNK_CHARS: "12000"   # 每次送给模型的原文字数：32k 上下文用 12000，8k 上下文改 3000
+      # 每次送给模型的原文字数默认自动按上下文长度计算（llama.cpp 的 -c），一般不用设
       # 语义检索默认关闭；开启后还要配置 DOCSEARCH_EMBED_URL
       # DOCSEARCH_SEMANTIC: "1"
       # DOCSEARCH_EMBED_URL: http://192.168.18.61:18084

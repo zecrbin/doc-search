@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 
-from . import config, db, llm
+from . import db, llm
 
 log = logging.getLogger(__name__)
 
@@ -80,7 +80,20 @@ def split_text(text: str, size: int) -> list[str]:
 
 
 def summarize(name: str, text: str, progress=lambda msg: None) -> str:
-    size = config.LLM_CHUNK_CHARS
+    size = llm.chunk_chars()
+    while True:
+        try:
+            return _summarize(name, text, size, progress)
+        except llm.ContextOverflow:  # 估算偏大或服务端上下文比报告的小：分段减半重试，直到每段不足 1000 字
+            if size <= 1000:
+                raise RuntimeError("原文分段后仍超出大模型上下文长度：请调大 llama-server 的 -c 参数，"
+                                   "或设置 DOCSEARCH_LLM_CHUNK_CHARS 为更小的值")
+            size //= 2
+            log.info("%s：超出上下文，改为每段 %d 字重试", name, size)
+            progress(f"超出上下文，改为每段 {size} 字重试")
+
+
+def _summarize(name: str, text: str, size: int, progress) -> str:
     if len(text) <= size:
         progress("生成概述")
         return llm.chat(SYSTEM, FINAL_FROM_TEXT.format(name=name, format=FORMAT, text=text))

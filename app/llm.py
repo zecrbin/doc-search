@@ -12,6 +12,16 @@ log = logging.getLogger(__name__)
 
 _client: httpx.Client | None = None
 _model: str | None = None
+_ctx: int | None = None
+_ctx_checked = False
+
+
+class ContextOverflow(RuntimeError):
+    """输入超出模型上下文长度。"""
+
+
+# llama.cpp："the request exceeds the available context size"；vLLM："maximum context length is ..."
+_OVERFLOW = re.compile(r"exceed|context (size|length)|maximum context|too long|n_ctx", re.I)
 
 
 def enabled() -> bool:
@@ -46,6 +56,46 @@ def model() -> str:
     return _model
 
 
+def context_tokens() -> int | None:
+    """模型（每个并发槽位）的上下文长度，取不到返回 None。"""
+    global _ctx, _ctx_checked
+    if not _ctx_checked:
+        _ctx_checked = True
+        root = re.sub(r"/v1/?$", "", base_url())
+        try:  # llama.cpp：/props 里是每个槽位的 n_ctx（-c 除以 -np）
+            r = _http().get(root + "/props", timeout=10)
+            if r.status_code == 200:
+                j = r.json()
+                _ctx = (j.get("default_generation_settings") or {}).get("n_ctx") or j.get("n_ctx")
+        except (httpx.HTTPError, ValueError):
+            pass
+        if not _ctx:
+            try:  # vLLM：/models 里的 max_model_len
+                r = _http().get("/models", timeout=10)
+                if r.status_code == 200:
+                    _ctx = next((m.get("max_model_len") for m in r.json().get("data") or [] if m.get("max_model_len")), None)
+            except (httpx.HTTPError, ValueError):
+                pass
+        _ctx = int(_ctx) if _ctx else None
+    return _ctx
+
+
+def output_tokens() -> int:
+    """每次最多生成多少 token：上下文较小时让出空间给原文。"""
+    ctx = context_tokens()
+    return min(config.LLM_MAX_TOKENS, ctx // 4) if ctx else config.LLM_MAX_TOKENS
+
+
+def chunk_chars() -> int:
+    """每次送给模型的原文字数。中文约 1～1.5 字/token，按 0.9 字/token 保守估算，再留出提示词和输出的空间。"""
+    if config.LLM_CHUNK_CHARS > 0:
+        return config.LLM_CHUNK_CHARS
+    ctx = context_tokens()
+    if not ctx:
+        return 12000
+    return max(1500, min(30000, int((ctx - output_tokens() - 1000) * 0.9)))
+
+
 _THINK = re.compile(r"<think>.*?</think>", re.S)
 
 
@@ -65,7 +115,7 @@ def chat(system: str, user: str, max_tokens: int | None = None, retries: int = 2
         "model": model(),
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "temperature": 0.2,
-        "max_tokens": max_tokens or config.LLM_MAX_TOKENS,
+        "max_tokens": max_tokens or output_tokens(),
         "stream": False,
     }
     if config.LLM_NO_THINK:
@@ -86,6 +136,8 @@ def chat(system: str, user: str, max_tokens: int | None = None, retries: int = 2
             status = e.response.status_code if isinstance(e, httpx.HTTPStatusError) else None
             if status is not None and status < 500 or attempt == retries:
                 detail = e.response.text[:300] if status is not None else str(e)
+                if status in (400, 413) and _OVERFLOW.search(detail):
+                    raise ContextOverflow(f"超出大模型上下文长度：{detail}") from e
                 raise RuntimeError(f"大模型调用失败：{detail}") from e
             time.sleep(3 * (attempt + 1))
     raise AssertionError("unreachable")

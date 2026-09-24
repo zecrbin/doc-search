@@ -29,9 +29,10 @@ uv run python -m app.cli import D:\标书
 
 文件解析完成后，自动调用大模型生成"服务内容概述"：概述、服务内容、主要技术指标、服务与商务要求（工期、质保、付款、资质等）。在文件库每行的"概述"按钮、或检索页右侧的"概述"按钮查看，可重新生成；文件库勾选后可批量生成。
 
-- 支持 OpenAI 兼容接口（vLLM、SGLang、LMDeploy、Ollama、llama.cpp 等都提供）。先确认接口可用：`curl http://大模型IP:端口/v1/models`，能返回模型列表即可。
+- 支持 OpenAI 兼容接口（llama.cpp 的 llama-server、vLLM、SGLang、LMDeploy、Ollama 等都提供）。先确认接口可用：`curl http://大模型IP:端口/v1/models`，能返回模型列表即可。
 - 配置 `DOCSEARCH_LLM_URL`（例如 `http://192.168.18.61:8000/v1`），模型名 `DOCSEARCH_LLM_MODEL` 可不填（自动取第一个）；接口要密钥时配 `DOCSEARCH_LLM_API_KEY`。
-- 长文档先分段提取要点、再汇总，每段字数 `DOCSEARCH_LLM_CHUNK_CHARS`（默认 12000，适合 32k 上下文；8k 上下文改成 3000）。
+- 长文档先分段提取要点、再汇总。每段字数自动按模型上下文长度计算（llama.cpp 读 `/props` 里的 `n_ctx`，vLLM 读 `max_model_len`），取不到时 12000；超出上下文时自动减半重试。也可用 `DOCSEARCH_LLM_CHUNK_CHARS` 指定。
+- 配好后自检：`docker compose exec doc-search python -m app.cli llm`，会显示模型名、上下文长度、每段字数，并试调用一次。
 - 概述在单独的后台队列里生成，不影响解析和检索；Qwen3 等思考模型默认关闭思考（`DOCSEARCH_LLM_NO_THINK=1`），输出里的思考过程也会自动去掉。
 - 不配置 `DOCSEARCH_LLM_URL` 就不生成概述，其他功能不受影响。
 

@@ -15,17 +15,24 @@ class FakeLLM:
         self.payloads = []
         self.fail = 0  # 前几次返回 500
         self.on_call = None
+        self.props = None  # llama.cpp /props 返回的内容
+        self.max_user = None  # user 内容超过这么多字时返回"超出上下文"（模拟 llama-server）
         self.reply = lambda user: "<think>先想一想</think>\n```markdown\n## 概述\n这是概述。\n```"
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/models"):
             return httpx.Response(200, json={"data": [{"id": "qwen-test"}]})
+        if request.url.path.endswith("/props"):
+            return httpx.Response(200, json=self.props) if self.props else httpx.Response(404)
         body = json.loads(request.content)
         self.payloads.append(body)
         if self.fail:
             self.fail -= 1
             return httpx.Response(500, text="GPU 忙")
         user = body["messages"][-1]["content"]
+        if self.max_user and len(user) > self.max_user:
+            return httpx.Response(400, json={"error": {"code": 400, "type": "exceed_context_size_error",
+                                                       "message": "the request exceeds the available context size"}})
         self.calls.append(user)
         if self.on_call:
             self.on_call()
@@ -38,6 +45,8 @@ def fake(monkeypatch):
     monkeypatch.setattr(config, "LLM_URL", "http://llm:8000")
     monkeypatch.setattr(llm, "_client", httpx.Client(base_url=llm.base_url(), transport=httpx.MockTransport(f)))
     monkeypatch.setattr(llm, "_model", None)
+    monkeypatch.setattr(llm, "_ctx", None)
+    monkeypatch.setattr(llm, "_ctx_checked", False)
     monkeypatch.setattr(llm.time, "sleep", lambda s: None)
     return f
 
@@ -156,3 +165,44 @@ def test_no_llm_configured_skips_summary(tmp_path):
     assert _row(doc["id"])["summary_status"] is None
     r = TestClient(main.app).get(f"/api/documents/{doc['id']}/summary").json()
     assert r["llm"] is False and r["status"] is None
+
+
+def test_context_detected_from_llamacpp_props(fake):
+    assert llm.chunk_chars() == 12000  # 接口不报告上下文长度时用默认值
+    llm._ctx_checked = False
+    fake.props = {"default_generation_settings": {"n_ctx": 8192}}
+    assert llm.context_tokens() == 8192
+    assert llm.output_tokens() == 2048
+    assert llm.chunk_chars() == int((8192 - 2048 - 1000) * 0.9)
+    llm._ctx_checked = False
+    fake.props = {"default_generation_settings": {"n_ctx": 4096}}
+    assert llm.output_tokens() == 1024  # 上下文小时少生成一些，给原文留空间
+
+
+def test_context_overflow_halves_chunks(tmp_path, fake):
+    fake.props = {"default_generation_settings": {"n_ctx": 32768}}  # 报告 32k，实际只能放 1500 字
+    fake.max_user = 1500
+    fake.reply = lambda user: "- 要点" if "部分原文" in user else "## 概述\n完成"
+    doc = _ingest(tmp_path, [f"第{i}节：系统应支持态势感知，响应时间不超过{i}秒。" * 12 for i in range(1, 9)])
+    summary.Worker()._step()
+    row = _row(doc["id"])
+    assert row["summary_status"] == "done", row["summary_message"]
+    assert all(len(c) <= 1500 for c in fake.calls)
+
+
+def test_overflow_even_when_tiny_reports_clear_error(tmp_path, fake, monkeypatch):
+    monkeypatch.setattr(config, "LLM_CHUNK_CHARS", 1200)
+    fake.max_user = 10  # 怎么切都放不下
+    doc = _ingest(tmp_path, ["质保期三年。" * 50])
+    summary.Worker()._step()
+    row = _row(doc["id"])
+    assert row["summary_status"] == "failed" and "-c" in row["summary_message"]
+
+
+def test_cli_llm_check(fake, capsys):
+    from app import cli
+    fake.props = {"default_generation_settings": {"n_ctx": 16384}}
+    fake.reply = lambda user: "<think>嗯</think>我是 Qwen。"
+    assert cli.check_llm() == 0
+    out = capsys.readouterr().out
+    assert "qwen-test" in out and "16384" in out and "我是 Qwen。" in out and "正常" in out
