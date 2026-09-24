@@ -8,7 +8,7 @@ from pathlib import Path
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -55,24 +55,84 @@ def upload(files: list[UploadFile] = File(...)):
     return out
 
 
+_STATUS_WHERE = {
+    "all": "1",
+    "busy": "status NOT IN ('done', 'failed')",
+    "done": "status = 'done'",
+    "failed": "status = 'failed'",
+}
+
+
+def _list_filter(status: str, q: str) -> tuple[str, list]:
+    if status not in _STATUS_WHERE:
+        raise HTTPException(400, f"status 只能是 {list(_STATUS_WHERE)}")
+    where, args = [_STATUS_WHERE[status]], []
+    if q.strip():
+        where.append("instr(lower(filename), ?) > 0")
+        args.append(q.strip().lower())
+    return " AND ".join(where), args
+
+
 @app.get("/api/documents")
-def list_documents():
+def list_documents(page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=500),
+                   status: str = "all", q: str = Query("", max_length=200)):
+    """文件库分页列表（新上传的在前）。counts 是按文件名筛选后各状态的数量，overall 是整个库的数量。"""
+    where, args = _list_filter(status, q)
+    name_where, name_args = _list_filter("all", q)
     with db.session() as conn:
-        docs = [dict(r) for r in conn.execute(
+        total = conn.execute(f"SELECT count(*) FROM documents WHERE {where}", args).fetchone()[0]
+        items = [dict(r) for r in conn.execute(
             "SELECT id, filename, ext, size, pages, ocr_pages, chunk_count, status, progress, message,"
-            " created_at, updated_at, started_at, finished_at FROM documents ORDER BY id DESC")]
-    return docs
+            " created_at, updated_at, started_at, finished_at,"
+            # 排队位置：后台按 id 从小到大处理
+            " CASE WHEN status='queued' THEN (SELECT count(*) FROM documents q WHERE q.status='queued' AND q.id <= documents.id)"
+            " END AS queue_pos"
+            f" FROM documents WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            [*args, page_size, (page - 1) * page_size])]
+        counts = {k: conn.execute(f"SELECT count(*) FROM documents WHERE {name_where} AND {w}", name_args).fetchone()[0]
+                  for k, w in _STATUS_WHERE.items()}
+        overall = conn.execute(
+            f"SELECT count(*), sum({_STATUS_WHERE['busy']}) FROM documents").fetchone()
+    return {"items": items, "total": total, "page": page, "page_size": page_size, "counts": counts,
+            "overall": {"all": overall[0], "busy": overall[1] or 0}}
+
+
+@app.get("/api/documents/ids")
+def list_document_ids(status: str = "all", q: str = Query("", max_length=200)):
+    """当前筛选条件下的全部文件 id（批量操作"选中全部"用）。"""
+    where, args = _list_filter(status, q)
+    with db.session() as conn:
+        return [r[0] for r in conn.execute(f"SELECT id FROM documents WHERE {where} ORDER BY id DESC", args)]
+
+
+def _delete(conn, doc_id: int) -> dict | None:
+    row = conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+    if not row:
+        return None
+    db.delete_chunks(conn, doc_id)
+    conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
+    return dict(row)
 
 
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: int):
     with db.session() as conn:
-        doc = _doc_or_404(conn, doc_id)
-        db.delete_chunks(conn, doc_id)
-        conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
+        doc = _delete(conn, doc_id)
+        if doc is None:
+            raise HTTPException(404, "文档不存在")
     # 正在处理的文档：后台线程在下一次更新进度时发现已删除，会停下并再清理一次文件
     ingest.remove_files(doc)
     return {"ok": True}
+
+
+@app.post("/api/documents/delete")
+def delete_documents(ids: list[int] = Body(..., embed=True, max_length=100000)):
+    """批量删除。已经不存在的 id 忽略。"""
+    with db.session() as conn:
+        docs = [d for d in (_delete(conn, i) for i in dict.fromkeys(ids)) if d]
+    for doc in docs:
+        ingest.remove_files(doc)
+    return {"deleted": len(docs)}
 
 
 _REQUEUE = ("UPDATE documents SET status='queued', progress=0, message=NULL, started_at=NULL, finished_at=NULL,"
@@ -80,10 +140,14 @@ _REQUEUE = ("UPDATE documents SET status='queued', progress=0, message=NULL, sta
 
 
 @app.post("/api/documents/reindex")
-def reindex_all():
-    """全部重新解析（改了词典、升级了解析逻辑后用）。处理中的文档不受影响。"""
+def reindex_many(ids: list[int] | None = Body(None, embed=True)):
+    """批量重新解析；不传 ids 表示全部（改了词典、升级了解析逻辑后用）。处理中的文档不受影响。"""
     with db.session() as conn:
-        n = conn.execute(_REQUEUE + " WHERE status IN ('done', 'failed')").rowcount
+        if ids is None:
+            n = conn.execute(_REQUEUE + " WHERE status IN ('done', 'failed')").rowcount
+        else:
+            n = sum(conn.execute(_REQUEUE + " WHERE id=? AND status IN ('done', 'failed')", (i,)).rowcount
+                    for i in dict.fromkeys(ids))
     ingest.worker.wake.set()
     return {"queued": n}
 

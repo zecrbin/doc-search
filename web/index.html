@@ -60,18 +60,30 @@
 
     <div class="lib-toolbar">
       <div class="chips" id="statusFilter"></div>
+      <input id="libQ" class="lib-q" type="search" placeholder="按文件名筛选" autocomplete="off">
       <button class="btn small" id="reindexAll" title="改了行业词典、升级了解析程序后使用">全部重新解析</button>
+    </div>
+
+    <div class="sel-bar" id="selBar" hidden>
+      <span id="selText"></span>
+      <button class="link" id="selAll" hidden></button>
+      <span class="spacer"></span>
+      <button class="btn small" id="selReindex">重新解析</button>
+      <button class="btn small danger" id="selDelete">删除</button>
+      <button class="btn small" id="selClear">取消选择</button>
     </div>
 
     <div class="lib-table-wrap">
       <table class="lib-table">
         <thead><tr>
+          <th class="check"><input type="checkbox" id="selPage" title="选中本页"></th>
           <th>文件名</th><th class="num">大小</th><th class="num">页数</th><th>状态</th><th>进度 / 结果</th>
           <th>上传时间</th><th>完成时间</th><th class="num">耗时</th><th></th>
         </tr></thead>
         <tbody id="docRows"></tbody>
       </table>
     </div>
+    <div class="pager" id="pager"></div>
   </main>
 
   <div class="drop-overlay" id="dropOverlay">松开即可上传</div>

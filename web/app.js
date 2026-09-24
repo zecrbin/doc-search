@@ -40,7 +40,7 @@ $("#tabs").addEventListener("click", (e) => {
 // ------------------------------------------------------------------ 检索
 
 const MORE_PAGE = 500; // 展开时每次向后端取多少段
-const state = { data: null, active: null, docs: [], filter: "all" };
+const state = { data: null, active: null };
 
 $("#searchForm").addEventListener("submit", (e) => { e.preventDefault(); runSearch(); });
 document.addEventListener("keydown", (e) => {
@@ -407,12 +407,7 @@ const STATUS = {
   importing: "导入中", queued: "排队中", converting: "转换 PDF", parsing: "解析中", embedding: "向量化", done: "成功", failed: "失败",
 };
 const busy = (d) => !["done", "failed"].includes(d.status);
-const FILTERS = [
-  ["all", "全部", () => true],
-  ["busy", "处理中", busy],
-  ["done", "成功", (d) => d.status === "done"],
-  ["failed", "失败", (d) => d.status === "failed"],
-];
+const FILTERS = [["all", "全部"], ["busy", "处理中"], ["done", "成功"], ["failed", "失败"]];
 
 const parseTime = (s) => (s ? new Date(s.replace(" ", "T")) : null);
 const fmtTime = (s) => (s ? s.slice(0, 16) : "–");
@@ -427,13 +422,6 @@ function fmtSize(n) {
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(0)} KB`;
   return `${(n / 1024 ** 2).toFixed(1)} MB`;
 }
-
-$("#statusFilter").addEventListener("click", (e) => {
-  const b = e.target.closest("button[data-filter]");
-  if (!b) return;
-  state.filter = b.dataset.filter;
-  renderDocs();
-});
 
 $("#fileInput").addEventListener("change", (e) => { upload(e.target.files); e.target.value = ""; });
 
@@ -516,35 +504,62 @@ async function doUpload(files) {
   }
 }
 
+// 文件库列表：服务端分页；选中的文件跨页保留，换筛选条件时清空
+const lib = { page: 1, pageSize: 50, status: "all", q: "", data: null, selected: new Set() };
+try { lib.pageSize = +localStorage.getItem("libPageSize") || 50; } catch {}
+
 let pollTimer;
 async function refreshDocs() {
   clearTimeout(pollTimer);
+  const params = new URLSearchParams({ page: lib.page, page_size: lib.pageSize, status: lib.status, q: lib.q });
+  let data;
   try {
-    state.docs = await api("/api/documents");
+    data = await api(`/api/documents?${params}`);
   } catch {
     pollTimer = setTimeout(refreshDocs, 5000);
     return;
   }
+  const pages = Math.max(1, Math.ceil(data.total / lib.pageSize));
+  if (lib.page > pages) { // 删除后当前页可能没了
+    lib.page = pages;
+    return refreshDocs();
+  }
+  lib.data = data;
   renderDocs();
-  pollTimer = setTimeout(refreshDocs, state.docs.some(busy) ? 2000 : 15000);
+  pollTimer = setTimeout(refreshDocs, data.overall.busy ? 2000 : 15000);
 }
 
-function renderDocs() {
-  const docs = state.docs;
-  const nBusy = docs.filter(busy).length;
-  $("#docCount").textContent = docs.length;
-  $("#busyCount").hidden = !nBusy;
-  $("#busyCount").textContent = `${nBusy} 处理中`;
+function resetList() {
+  lib.page = 1;
+  lib.selected.clear();
+  refreshDocs();
+}
 
-  $("#statusFilter").innerHTML = FILTERS.map(([key, label, fn]) =>
-    `<button type="button" data-filter="${key}" class="${state.filter === key ? "on" : ""} ${key}">${label} <b>${docs.filter(fn).length}</b></button>`,
+$("#statusFilter").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-filter]");
+  if (!b || b.dataset.filter === lib.status) return;
+  lib.status = b.dataset.filter;
+  resetList();
+});
+
+let libQTimer;
+$("#libQ").addEventListener("input", (e) => {
+  clearTimeout(libQTimer);
+  libQTimer = setTimeout(() => { lib.q = e.target.value.trim(); resetList(); }, 300);
+});
+
+function renderDocs() {
+  const { items, total, counts, overall } = lib.data;
+  $("#docCount").textContent = overall.all;
+  $("#busyCount").hidden = !overall.busy;
+  $("#busyCount").textContent = `${overall.busy} 处理中`;
+
+  $("#statusFilter").innerHTML = FILTERS.map(([key, label]) =>
+    `<button type="button" data-filter="${key}" class="${lib.status === key ? "on" : ""} ${key}">${label} <b>${counts[key]}</b></button>`,
   ).join("");
 
-  // 排队顺序：后台按 id 从小到大处理
-  const queue = docs.filter((d) => d.status === "queued").map((d) => d.id).sort((a, b) => a - b);
   const now = Date.now();
-  const shown = docs.filter(FILTERS.find(([k]) => k === state.filter)[2]);
-  $("#docRows").innerHTML = shown.length ? shown.map((d) => {
+  $("#docRows").innerHTML = items.length ? items.map((d) => {
     const cls = d.status === "done" ? "done" : d.status === "failed" ? "failed" : "busy";
     let detail;
     if (d.status === "failed") {
@@ -552,7 +567,7 @@ function renderDocs() {
     } else if (d.status === "done") {
       detail = `<span class="muted">${d.chunk_count} 个片段${d.ocr_pages ? ` · OCR ${d.ocr_pages} 页` : ""}</span>`;
     } else if (d.status === "queued") {
-      detail = `<span class="muted">排队第 ${queue.indexOf(d.id) + 1} 位</span>`;
+      detail = `<span class="muted">排队第 ${d.queue_pos} 位</span>`;
     } else {
       const pct = Math.round((d.progress || 0) * 100);
       detail = `<div class="bar"><i style="width:${pct}%"></i></div><span class="muted">${pct}%${d.message ? ` · ${esc(d.message)}` : ""}</span>`;
@@ -560,11 +575,12 @@ function renderDocs() {
     const start = parseTime(d.started_at);
     const end = parseTime(d.finished_at);
     const dur = start && end ? fmtDur(end - start) : start && busy(d) ? `已用 ${fmtDur(now - start)}` : "–";
-    const pages = d.pages ? d.pages : "–";
-    return `<tr class="${cls}">
+    const sel = lib.selected.has(d.id);
+    return `<tr class="${cls}${sel ? " selected" : ""}">
+      <td class="check"><input type="checkbox" data-sel="${d.id}" ${sel ? "checked" : ""}></td>
       <td class="name" title="${esc(d.filename)}">${esc(d.filename)}</td>
       <td class="num">${fmtSize(d.size)}</td>
-      <td class="num">${pages}</td>
+      <td class="num">${d.pages || "–"}</td>
       <td><span class="label ${cls}">${STATUS[d.status] || esc(d.status)}</span></td>
       <td class="detail">${detail}</td>
       <td class="time">${fmtTime(d.created_at)}</td>
@@ -575,27 +591,154 @@ function renderDocs() {
         <button class="btn small" data-reindex="${d.id}" ${busy(d) ? "disabled" : ""}>重新解析</button>
         <button class="btn small danger" data-del="${d.id}">删除</button>
       </td></tr>`;
-  }).join("") : `<tr><td colspan="9" class="hint">${docs.length ? "没有符合条件的文件" : "还没有文件，点击上方上传"}</td></tr>`;
+  }).join("") : `<tr><td colspan="10" class="hint">${overall.all ? "没有符合条件的文件" : "还没有文件，点击上方上传"}</td></tr>`;
+
+  renderSelection();
+  renderPager(total);
 }
+
+function renderSelection() {
+  const { items, total } = lib.data;
+  const n = lib.selected.size;
+  const onPage = items.filter((d) => lib.selected.has(d.id)).length;
+  const head = $("#selPage");
+  head.checked = items.length > 0 && onPage === items.length;
+  head.indeterminate = onPage > 0 && onPage < items.length;
+  document.querySelectorAll("#docRows [data-sel]").forEach((cb) => {
+    cb.checked = lib.selected.has(+cb.dataset.sel);
+    cb.closest("tr").classList.toggle("selected", cb.checked);
+  });
+  $("#selBar").hidden = !n;
+  $("#selText").textContent = `已选 ${n} 个文件`;
+  // 本页全选了、但筛选结果不止这一页：提供"选中全部"
+  const canAll = head.checked && n < total;
+  $("#selAll").hidden = !canAll;
+  $("#selAll").textContent = `选中全部 ${total} 个${lib.status !== "all" || lib.q ? "符合条件的" : ""}文件`;
+}
+
+function renderPager(total) {
+  const pages = Math.max(1, Math.ceil(total / lib.pageSize));
+  const cur = lib.page;
+  const nums = [...new Set([1, cur - 2, cur - 1, cur, cur + 1, cur + 2, pages])].filter((x) => x >= 1 && x <= pages).sort((a, b) => a - b);
+  let prev = 0;
+  const btns = nums.map((x) => {
+    const gap = x - prev > 1 ? '<span class="gap">…</span>' : "";
+    prev = x;
+    return `${gap}<button type="button" data-page="${x}" class="${x === cur ? "on" : ""}">${x}</button>`;
+  }).join("");
+  $("#pager").innerHTML = `
+    <span class="muted">共 ${total} 个</span>
+    <span class="pages-btns">
+      <button type="button" data-page="${cur - 1}" ${cur <= 1 ? "disabled" : ""}>‹ 上一页</button>${btns}
+      <button type="button" data-page="${cur + 1}" ${cur >= pages ? "disabled" : ""}>下一页 ›</button>
+    </span>
+    <label class="muted">每页 <select id="pageSize">${[20, 50, 100, 200].map((n) =>
+      `<option ${n === lib.pageSize ? "selected" : ""}>${n}</option>`).join("")}</select> 个</label>`;
+}
+
+$("#pager").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-page]");
+  if (!b || b.disabled || +b.dataset.page === lib.page) return;
+  lib.page = +b.dataset.page;
+  refreshDocs();
+  $(".lib-table-wrap").scrollTop = 0;
+});
+$("#pager").addEventListener("change", (e) => {
+  if (e.target.id !== "pageSize") return;
+  lib.pageSize = +e.target.value;
+  try { localStorage.setItem("libPageSize", lib.pageSize); } catch {}
+  lib.page = 1;
+  refreshDocs();
+});
+
+$("#selPage").addEventListener("change", (e) => {
+  lib.data.items.forEach((d) => (e.target.checked ? lib.selected.add(d.id) : lib.selected.delete(d.id)));
+  renderSelection();
+});
+$("#selAll").addEventListener("click", async () => {
+  try {
+    const ids = await api(`/api/documents/ids?${new URLSearchParams({ status: lib.status, q: lib.q })}`);
+    ids.forEach((id) => lib.selected.add(id));
+    renderSelection();
+  } catch (err) {
+    alert(`操作失败：${err.message}`);
+  }
+});
+$("#selClear").addEventListener("click", () => { lib.selected.clear(); renderSelection(); });
+
+$("#selDelete").addEventListener("click", async () => {
+  const ids = [...lib.selected];
+  if (!confirm(`确定删除选中的 ${ids.length} 个文件？索引和文件都会一起删除，无法恢复。`)) return;
+  await withBusy($("#selDelete"), "删除中…", async () => {
+    const r = await api("/api/documents/delete", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }),
+    });
+    notice("ok", `已删除 ${r.deleted} 个文件`);
+    afterDelete(ids);
+  });
+});
+$("#selReindex").addEventListener("click", async () => {
+  const ids = [...lib.selected];
+  await withBusy($("#selReindex"), "提交中…", async () => {
+    const r = await api("/api/documents/reindex", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }),
+    });
+    const skipped = ids.length - r.queued;
+    notice("ok", `已加入解析队列：${r.queued} 个文件${skipped ? `（${skipped} 个正在处理中，已跳过）` : ""}`);
+    lib.selected.clear();
+  });
+});
+
+async function withBusy(btn, text, fn) {
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = text;
+  try {
+    await fn();
+  } catch (err) {
+    alert(`操作失败：${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+    refreshDocs();
+  }
+}
+
+// 删掉的文件如果正在预览、或在检索结果里，一并清掉
+function afterDelete(ids) {
+  const gone = new Set(ids.map(Number));
+  gone.forEach((id) => lib.selected.delete(id));
+  if (gone.has(viewer.docId)) {
+    viewer.token++;
+    viewer.hlToken++;
+    viewer.pdf?.destroy();
+    Object.assign(viewer, { pdf: null, docId: null, pages: [] });
+    setHits([]);
+    pagesEl.innerHTML = `<div class="empty">文档已删除</div>`;
+    $("#viewerBar").hidden = true;
+  }
+  if (state.data?.docs.some((d) => gone.has(d.doc_id))) runSearch();
+}
+
+$("#docRows").addEventListener("change", (e) => {
+  const cb = e.target.closest("[data-sel]");
+  if (!cb) return;
+  (cb.checked ? lib.selected.add(+cb.dataset.sel) : lib.selected.delete(+cb.dataset.sel));
+  renderSelection();
+});
 
 $("#docRows").addEventListener("click", async (e) => {
   const re = e.target.closest("[data-reindex]");
   const del = e.target.closest("[data-del]");
+  if (!re && !del) return;
   try {
     if (re) {
       await api(`/api/documents/${re.dataset.reindex}/reindex`, { method: "POST" });
-    } else if (del) {
-      const d = state.docs.find((x) => String(x.id) === del.dataset.del);
+    } else {
+      const d = lib.data.items.find((x) => String(x.id) === del.dataset.del);
       if (!confirm(`确定删除「${d?.filename}」？索引和文件都会一起删除。`)) return;
       await api(`/api/documents/${del.dataset.del}`, { method: "DELETE" });
-      if (viewer.docId === +del.dataset.del) {
-        viewer.token++;
-        viewer.pdf?.destroy();
-        Object.assign(viewer, { pdf: null, docId: null, pages: [] });
-        setHits([]);
-        pagesEl.innerHTML = `<div class="empty">文档已删除</div>`;
-        $("#viewerBar").hidden = true;
-      }
+      afterDelete([+del.dataset.del]);
     }
   } catch (err) {
     alert(`操作失败：${err.message}`);

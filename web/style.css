@@ -176,3 +176,28 @@ body { margin: 0; background: var(--bg); height: 100vh; display: flex; flex-dire
   .layout { grid-template-columns: 1fr; grid-template-rows: 50% 50%; }
   .search-pane { border-right: 0; border-bottom: 1px solid var(--line); }
 }
+
+/* 文件库：筛选、批量操作、分页 */
+.lib-toolbar .chips { flex: 1; }
+.lib-q { width: 220px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; font-size: 13px; outline: none; }
+.lib-q:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.sel-bar {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: var(--radius);
+  background: var(--accent-soft); border: 1px solid #c9d6f5; font-size: 13px;
+}
+.sel-bar .spacer { flex: 1; }
+.link { border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
+.lib-table th.check, .lib-table td.check { width: 36px; text-align: center; padding-left: 12px; padding-right: 0; }
+.lib-table input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; vertical-align: middle; accent-color: var(--accent); }
+.lib-table tr.selected td { background: #f3f6fd; }
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
+.pages-btns { display: flex; align-items: center; gap: 4px; }
+.pages-btns button {
+  min-width: 32px; height: 30px; padding: 0 8px; border: 1px solid var(--line); background: var(--panel);
+  border-radius: 6px; font: inherit; font-size: 13px; cursor: pointer; color: var(--ink);
+}
+.pages-btns button:hover:not([disabled]) { border-color: var(--accent); color: var(--accent); }
+.pages-btns button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pages-btns button[disabled] { opacity: .4; cursor: default; }
+.pages-btns .gap { color: var(--muted); padding: 0 2px; }
+.pager select { font: inherit; font-size: 13px; padding: 2px 4px; border: 1px solid var(--line); border-radius: 4px; }
