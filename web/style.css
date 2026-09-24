@@ -218,7 +218,7 @@ dialog.summary-dlg::backdrop { background: rgba(20, 30, 50, .35); }
 .sum-body:empty { display: none; }
 .sum-body h3 { font-size: 15px; margin: 14px 0 6px; padding-left: 8px; border-left: 3px solid var(--accent); }
 .sum-body h3:first-child { margin-top: 0; }
-.sum-body p { margin: 4px 0; }
+.sum-body p { margin: 4px 0; text-indent: 2em; }
 .sum-body ul, .sum-body ol { margin: 4px 0; padding-left: 22px; }
 .sum-foot { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .sum-foot .spacer { flex: 1; }

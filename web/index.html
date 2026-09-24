@@ -40,7 +40,7 @@
           <button class="btn small" id="nextHit" title="下一处（F3）">下一处 ›</button>
         </span>
         <span class="viewer-page" id="viewerPage"></span>
-        <button class="btn small" id="viewerSummary" title="大模型生成的服务内容概述" data-llm hidden>概述</button>
+        <button class="btn small" id="viewerSummary" title="大模型根据原文生成的服务内容" data-llm hidden>服务内容</button>
         <a class="btn small" id="downloadOrig" href="#" download>下载原文</a>
       </div>
       <div class="pages" id="pages">
@@ -73,7 +73,7 @@
       <span id="selText"></span>
       <button class="link" id="selAll" hidden></button>
       <span class="spacer"></span>
-      <button class="btn small" id="selSummarize" data-llm hidden>生成概述</button>
+      <button class="btn small" id="selSummarize" data-llm hidden>生成服务内容</button>
       <button class="btn small" id="selReindex">重新解析</button>
       <button class="btn small danger" id="selDelete">删除</button>
       <button class="btn small" id="selClear">取消选择</button>
@@ -94,7 +94,7 @@
 
   <dialog id="summaryDlg" class="summary-dlg">
     <div class="sum-head">
-      <div class="sum-title"><h2>服务内容概述</h2><span id="sumFile"></span></div>
+      <div class="sum-title"><h2>服务内容</h2><span id="sumFile"></span></div>
       <button class="btn small" id="sumClose">关闭</button>
     </div>
     <div class="sum-status" id="sumStatus"></div>

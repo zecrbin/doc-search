@@ -17,7 +17,7 @@ class FakeLLM:
         self.on_call = None
         self.props = None  # llama.cpp /props 返回的内容
         self.max_user = None  # user 内容超过这么多字时返回"超出上下文"（模拟 llama-server）
-        self.reply = lambda user: "<think>先想一想</think>\n```markdown\n## 概述\n这是概述。\n```"
+        self.reply = lambda user: "<think>先想一想</think>\n本项目建设智慧城市平台，整合多源数据。"
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/models"):
@@ -97,33 +97,33 @@ def test_summary_generated_after_ingest(tmp_path, fake):
     assert _row(doc["id"])["summary_status"] == "queued"
     summary.Worker()._step()
     row = _row(doc["id"])
-    assert row["summary_status"] == "done" and row["summary"] == "## 概述\n这是概述。" and row["summary_at"]
-    assert len(fake.calls) == 1 and "质保期三年" in fake.calls[0] and "## 主要技术指标" in fake.calls[0]
+    assert row["summary_status"] == "done" and row["summary"] == "本项目建设智慧城市平台，整合多源数据。" and row["summary_at"]
+    assert len(fake.calls) == 1 and "质保期三年" in fake.calls[0] and "只输出一段话" in fake.calls[0]
     body = fake.payloads[0]
     assert body["model"] == "qwen-test" and body["chat_template_kwargs"] == {"enable_thinking": False}
     r = TestClient(main.app).get(f"/api/documents/{doc['id']}/summary").json()
-    assert r["status"] == "done" and r["summary"].startswith("## 概述")
+    assert r["status"] == "done" and r["summary"].startswith("本项目")
 
 
 def test_long_document_is_split_then_combined(tmp_path, fake, monkeypatch):
     monkeypatch.setattr(config, "LLM_CHUNK_CHARS", 200)
     pages = [f"第{i}章：系统应支持态势感知，指标{i}：响应时间不超过{i}秒。" * 4 for i in range(1, 6)]
-    fake.reply = lambda user: "要点：" + user[-30:] if "部分原文" in user else "## 概述\n汇总"
+    fake.reply = lambda user: "要点：" + user[-30:] if "部分原文" in user else "本项目汇总。"
     doc = _ingest(tmp_path, pages)
     summary.Worker()._step()
     extract = [c for c in fake.calls if "部分原文" in c]
     assert len(extract) >= 2  # 分段提取
     assert "各部分提取的要点" in fake.calls[-1]  # 最后按要点汇总
-    assert _row(doc["id"])["summary"] == "## 概述\n汇总"
+    assert _row(doc["id"])["summary"] == "本项目汇总。"
 
 
 def test_notes_too_long_are_merged(tmp_path, fake, monkeypatch):
     monkeypatch.setattr(config, "LLM_CHUNK_CHARS", 120)
-    fake.reply = lambda user: ("长要点" * 30) if "部分原文" in user else ("短" if "合并去重" in user else "## 概述\n终稿")
+    fake.reply = lambda user: ("长要点" * 30) if "部分原文" in user else ("短" if "合并去重" in user else "本项目终稿。")
     doc = _ingest(tmp_path, ["第一段内容。" * 30, "第二段内容。" * 30])
     summary.Worker()._step()
     assert any("合并去重" in c for c in fake.calls)
-    assert _row(doc["id"])["summary"] == "## 概述\n终稿"
+    assert _row(doc["id"])["summary"] == "本项目终稿。"
 
 
 def test_failure_is_recorded_and_can_retry(tmp_path, fake):
@@ -191,7 +191,7 @@ def test_context_detected_from_llamacpp_props(fake):
 def test_context_overflow_halves_chunks(tmp_path, fake):
     fake.props = {"default_generation_settings": {"n_ctx": 32768}}  # 报告 32k，实际只能放 1500 字
     fake.max_user = 1500
-    fake.reply = lambda user: "- 要点" if "部分原文" in user else "## 概述\n完成"
+    fake.reply = lambda user: "- 要点" if "部分原文" in user else "本项目完成。"
     doc = _ingest(tmp_path, [f"第{i}节：系统应支持态势感知，响应时间不超过{i}秒。" * 12 for i in range(1, 9)])
     summary.Worker()._step()
     row = _row(doc["id"])
@@ -230,18 +230,18 @@ def test_unreachable_llm_gives_clear_message(tmp_path, monkeypatch):
 
 def test_progress_reported_while_streaming(fake, monkeypatch):
     monkeypatch.setattr(config, "LLM_CHUNK_CHARS", 200)
-    fake.reply = lambda user: "- 要点" * 20 if "部分原文" in user else "## 概述\n" + "内容" * 40
+    fake.reply = lambda user: "- 要点" * 20 if "部分原文" in user else "本项目" + "内容" * 40 + "。"
     frames = []
     text = "\n".join(f"第{i}节：系统应支持态势感知，响应时间不超过{i}秒。" for i in range(40))
     result = summary.summarize("标书.pdf", text, lambda msg, frac, draft=None: frames.append((msg, frac, draft)))
-    assert result.startswith("## 概述")
+    assert result.startswith("本项目")
     fracs = [f for _, f, _ in frames]
     assert fracs == sorted(fracs) and 0 <= fracs[0] and fracs[-1] < 1  # 单调递增，完成前不到 100%
     msgs = [m for m, _, _ in frames]
     assert any("读取原文中" in m for m in msgs) and any("已输出" in m for m in msgs)
-    assert msgs[0].startswith("第 1/") and any("生成概述" in m for m in msgs)
+    assert msgs[0].startswith("第 1/") and any("生成服务内容" in m for m in msgs)
     drafts = [d for m, _, d in frames if d]
-    assert drafts and all("生成概述" in m for m, _, d in frames if d)  # 只有最后一步带草稿
+    assert drafts and all("生成服务内容" in m for m, _, d in frames if d)  # 只有最后一步带草稿
     assert len(drafts[-1]) > len(drafts[0])  # 草稿边生成边变长
 
 
@@ -256,3 +256,24 @@ def test_thinking_stream_reported(monkeypatch):
     seen = []
     assert llm.chat("s", "u", on_progress=lambda c, t, th: seen.append((c, th))) == "答案"
     assert seen == [(0, 30), (2, 30)]
+
+
+def test_output_forced_into_one_paragraph(tmp_path, fake):
+    """模型没按要求、还是分点输出时，合成一段话。"""
+    fake.reply = lambda user: "## 服务内容\n**本项目**建设党建系统大脑，搭建资源数据库。\n- 提供文件智能识别\n- 提供风险预警\n项目包含一年质保运维服务"
+    doc = _ingest(tmp_path, ["质保期一年。"])
+    summary.Worker()._step()
+    assert _row(doc["id"])["summary"] == ("本项目建设党建系统大脑，搭建资源数据库。提供文件智能识别；提供风险预警；"
+                                          "项目包含一年质保运维服务。")
+
+
+def test_local_examples_guide_style(tmp_path, fake):
+    """数据目录下的 summary_examples.txt 作为写法示例放进提示词（短行、空行忽略，最多 3 条）。"""
+    (config.DATA_DIR / summary.EXAMPLES_FILE).write_text(
+        "服务内容\n\n" + "\n".join(f"本项目示例{i}：整合数据处理、业务应用等核心系统，搭建高效业务对接渠道。" for i in range(1, 6)),
+        encoding="utf-8")
+    _ingest(tmp_path, ["质保期一年。"])
+    summary.Worker()._step()
+    prompt = fake.calls[-1]
+    assert "示例1：本项目示例1" in prompt and "示例3：本项目示例3" in prompt and "示例4" not in prompt
+    assert "服务内容\n\n" not in prompt

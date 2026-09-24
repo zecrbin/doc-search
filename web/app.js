@@ -971,17 +971,17 @@ $("#reindexAll").addEventListener("click", async () => {
   refreshDocs();
 });
 
-// ------------------------------------------------------------------ 文档概述（大模型）
+// ------------------------------------------------------------------ 服务内容（大模型生成）
 
 let llmEnabled = false;
-const SUMMARY_LABEL = { queued: "概述排队中", running: "概述生成中", failed: "概述失败", done: "概述" };
+const SUMMARY_LABEL = { queued: "服务内容排队中", running: "服务内容生成中", failed: "服务内容失败", done: "服务内容" };
 
 function summaryButton(d) {
   if (d.status !== "done" || (!llmEnabled && d.summary_status !== "done")) return "";
   const st = d.summary_status;
   const cls = st === "failed" ? " danger" : st === "queued" || st === "running" ? " pending" : "";
   const title = st === "failed" ? d.summary_message || "" : st === "running" ? d.summary_message || "" : "";
-  const label = st === "running" ? `概述 ${Math.round((d.summary_progress || 0) * 100)}%` : SUMMARY_LABEL[st] || "生成概述";
+  const label = st === "running" ? `服务内容 ${Math.round((d.summary_progress || 0) * 100)}%` : SUMMARY_LABEL[st] || "生成服务内容";
   return `<button class="btn small${cls}" data-summary="${d.id}" title="${esc(title)}">${label}</button>`;
 }
 
@@ -1011,7 +1011,7 @@ function renderMarkdown(md) {
 
 const sumDlg = { docId: null, timer: null, text: "", offset: 0 };
 
-// 概述生成中的"已用时间"每秒走一次（按服务器时钟）
+// 服务内容生成中的"已用时间"每秒走一次（按服务器时钟）
 setInterval(() => {
   const el = document.querySelector("#sumStatus [data-started]");
   if (el) el.textContent = fmtDur(Date.now() + sumDlg.offset - parseTime(el.dataset.started));
@@ -1044,11 +1044,11 @@ async function loadSummary() {
   status.className = "sum-status";
   const busyNow = r.status === "queued" || r.status === "running";
   if (!r.llm && r.status !== "done") {
-    status.textContent = "没有配置大模型（DOCSEARCH_LLM_URL），无法生成概述";
+    status.textContent = "没有配置大模型（DOCSEARCH_LLM_URL），无法生成服务内容";
   } else if (r.doc_status !== "done") {
-    status.textContent = "文件还在解析，解析完成后自动生成概述";
+    status.textContent = "文件还在解析，解析完成后自动生成服务内容";
   } else if (r.status === "queued") {
-    status.textContent = r.summary ? "文件已重新解析，正在排队重新生成（下面是上一次的概述）" : "排队中，前面的文件生成完就开始";
+    status.textContent = r.summary ? "文件已重新解析，正在排队重新生成（下面是上一次的结果）" : "排队中，前面的文件生成完就开始";
   } else if (r.status === "running") {
     const pct = Math.round((r.progress || 0) * 100);
     const elapsed = r.started_at ? fmtDur(Date.now() + sumDlg.offset - parseTime(r.started_at)) : "";
@@ -1060,7 +1060,7 @@ async function loadSummary() {
   } else if (r.status === "done") {
     status.textContent = `生成于 ${r.summary_at}`;
   } else {
-    status.textContent = "还没有生成概述，点击下方“重新生成”开始";
+    status.textContent = "还没有生成服务内容，点击下方“重新生成”开始";
   }
   sumDlg.text = r.summary || "";
   // 生成最后一步时，边生成边显示草稿
@@ -1110,7 +1110,7 @@ $("#selSummarize").addEventListener("click", async () => {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }),
     });
     const skipped = ids.length - r.queued;
-    notice("ok", `已加入概述队列：${r.queued} 个文件${skipped ? `（${skipped} 个未解析完成或正在生成，已跳过）` : ""}`);
+    notice("ok", `已加入服务内容生成队列：${r.queued} 个文件${skipped ? `（${skipped} 个未解析完成或正在生成，已跳过）` : ""}`);
     lib.selected.clear();
   });
 });
@@ -1126,7 +1126,7 @@ async function refreshHealth() {
     if (llmEnabled !== h.llm.enabled) {
       llmEnabled = h.llm.enabled;
       document.querySelectorAll("[data-llm]").forEach((el) => { el.hidden = !llmEnabled; });
-      if (lib.data) renderDocs(); // 文件库可能先于服务状态加载，补上"概述"按钮
+      if (lib.data) renderDocs(); // 文件库可能先于服务状态加载，补上"服务内容"按钮
     }
     $("#health").innerHTML = items.map(([n, c]) => `<span class="${c}">${n}</span>`).join("");
     $("#health").title = `已入库 ${h.documents} 份文档，${h.chunks} 个片段；OCR 服务只影响扫描件解析`;
