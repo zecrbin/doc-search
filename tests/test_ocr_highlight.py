@@ -129,3 +129,17 @@ def test_document_list_reports_server_time():
     import time
     r = TestClient(main.app).get("/api/documents").json()
     assert abs(time.mktime(time.strptime(r["now"], "%Y-%m-%d %H:%M:%S")) - time.time()) < 5
+
+
+def test_progress_proportional_to_ocr_when_all_pages_scanned(tmp_path, mineru, monkeypatch):
+    """全是扫描页时，进度就是 OCR 的进度，不能一开始就跳到 30%。"""
+    from app import config
+    monkeypatch.setattr(config, "MINERU_BATCH_PAGES", 1)
+    _scanned_pdf(tmp_path / "one.pdf")
+    doc = pymupdf.open(tmp_path / "one.pdf")
+    for _ in range(3):
+        doc.insert_pdf(pymupdf.open(tmp_path / "one.pdf"))
+    doc.save(tmp_path / "four.pdf")
+    frames = []
+    parser.parse_pdf(tmp_path / "four.pdf", lambda frac, msg: frames.append((round(frac, 3), msg)))
+    assert [f for f, m in frames if m.startswith("OCR")] == [0.0, 0.25, 0.5, 0.75]

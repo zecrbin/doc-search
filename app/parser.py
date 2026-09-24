@@ -45,6 +45,9 @@ class _Raw:
     page_height: float = field(default=0, repr=False)
 
 
+_OCR_PAGE_COST = 30  # 一页 OCR 相当于本地提取多少页的耗时（只用于分配进度）
+
+
 def parse_pdf(pdf_path, progress: Progress) -> tuple[list[Block], int, int, OcrLines]:
     """返回 (blocks, 页数, OCR 页数, OCR 文字行)。"""
     doc = pymupdf.open(pdf_path)
@@ -58,16 +61,21 @@ def parse_pdf(pdf_path, progress: Progress) -> tuple[list[Block], int, int, OcrL
 
         raws: list[_Raw] = []
         local_pages = [i for i in range(n) if i not in ocr_set]
+        # 进度按工作量分配：OCR 一页的耗时约等于本地提取几十页；全是扫描页时进度基本就是 OCR 的进度
+        w_local, w_ocr = len(local_pages), len(ocr_pages) * _OCR_PAGE_COST
+        local_share = w_local / (w_local + w_ocr) if w_local + w_ocr else 1.0
         for k, i in enumerate(local_pages):
             raws.extend(_extract_page(doc[i]))
             if k % 20 == 0:
-                progress(0.3 * k / max(1, len(local_pages)), f"提取文字 {k}/{len(local_pages)} 页")
+                progress(local_share * k / len(local_pages), f"提取文字 {k}/{len(local_pages)} 页")
         local_blocks = _classify(_drop_margins(raws, len(local_pages)))
 
         remote_blocks: list[Block] = []
         ocr_lines: OcrLines = {}
         if ocr_pages:
-            remote_blocks, ocr_lines = _mineru(doc, ocr_pages, progress, force_ocr=config.PARSE_MODE != "mineru")
+            remote_blocks, ocr_lines = _mineru(
+                doc, ocr_pages, lambda frac, msg: progress(local_share + (1 - local_share) * frac, msg),
+                force_ocr=config.PARSE_MODE != "mineru")
 
         by_page: dict[int, list[Block]] = defaultdict(list)
         for b in local_blocks + remote_blocks:
@@ -288,7 +296,7 @@ def _mineru(doc: pymupdf.Document, pages: list[int], progress: Progress,
             if start:  # 按已完成的批次估算速度和剩余时间，方便判断 MinerU 是否正常（GPU 被占满时会退回 CPU，慢十几倍）
                 per_page = (time.monotonic() - t_begin) / start
                 msg = f"OCR 识别 {start}/{len(pages)} 页（MinerU 约 {per_page:.1f} 秒/页，还需约 {_fmt_secs(per_page * (len(pages) - start))}）"
-            progress(0.3 + 0.7 * start / len(pages), msg)
+            progress(start / len(pages), msg)
             t_batch = time.monotonic()
             sub = pymupdf.open()
             for p in batch:
