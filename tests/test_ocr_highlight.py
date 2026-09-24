@@ -6,7 +6,7 @@ import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 
-from app import db, highlight, ingest, main, parser, search
+from app import db, highlight, ingest, main, parser
 
 LINE1 = "本项目为某市智慧城市综合管理平台建设"  # 18 个全角字，每字 12pt，行宽 216
 LINE2 = "项目，项目编号GZ-2026-0815。"
@@ -66,18 +66,18 @@ def test_scanned_pdf_keyword_boxes_end_to_end(tmp_path, mineru):
     ingest.Worker()._step()
     assert ingest.ocr_lines_path(doc["id"]).exists()
 
-    res = search.search("城市", "keyword")["results"]
-    hl = TestClient(main.app).get(f"/api/chunks/{res[0]['chunk_id']}/highlights", params={"q": "城市"}).json()
-    assert hl["exact"] and hl["ocr"]
-    [[pg, x0, y0, x1, y1]] = hl["boxes"]
+    url = f"/api/documents/{doc['id']}/highlights"
+    hl = TestClient(main.app).get(url, params={"q": "城市"}).json()
+    assert hl["ocr"] and [h["exact"] for h in hl["hits"]] == [True]
+    [[pg, x0, y0, x1, y1]] = hl["hits"][0]["boxes"]
     # "城市" 是第 9、10 个字：60 + 8×12 = 156 到 180
     assert pg == 0 and abs(x0 - 156) < 1 and abs(x1 - 180) < 1 and (y0, y1) == (89, 103)
 
     # 跨行 + 半角字母数字按字宽估算
-    hl = TestClient(main.app).get(f"/api/chunks/{res[0]['chunk_id']}/highlights", params={"q": "建设项目"}).json()
-    assert [b[2] for b in hl["boxes"]] == [89, 107]  # 行尾一个框、下一行一个框
-    hl = TestClient(main.app).get(f"/api/chunks/{res[0]['chunk_id']}/highlights", params={"q": "gz-2026-0815"}).json()
-    [[_, x0, _, x1, _]] = hl["boxes"]
+    hl = TestClient(main.app).get(url, params={"q": "建设项目"}).json()
+    assert [b[2] for b in hl["hits"][0]["boxes"]] == [89, 107]  # 一处命中：行尾一个框、下一行一个框
+    hl = TestClient(main.app).get(url, params={"q": "gz-2026-0815"}).json()
+    [[_, x0, _, x1, _]] = hl["hits"][0]["boxes"]
     assert 60 + 7 * 12 - 20 < x0 < x1 < 245  # 在第二行的编号附近
 
     ingest.remove_files({**doc, "sha256": "gone"})
@@ -106,6 +106,5 @@ def test_old_mineru_without_middle_json_still_ingests(tmp_path, monkeypatch):
     ingest.Worker()._step()
     with db.session() as conn:
         assert conn.execute("SELECT status FROM documents WHERE id=?", (doc["id"],)).fetchone()[0] == "done"
-    res = search.search("城市", "keyword")["results"]
-    hl = TestClient(main.app).get(f"/api/chunks/{res[0]['chunk_id']}/highlights", params={"q": "城市"}).json()
-    assert not hl["exact"]  # 没有行坐标：退回整段框
+    hl = TestClient(main.app).get(f"/api/documents/{doc['id']}/highlights", params={"q": "城市"}).json()
+    assert [h["exact"] for h in hl["hits"]] == [False]  # 没有行坐标：退回整段框

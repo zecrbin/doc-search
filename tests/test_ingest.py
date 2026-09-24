@@ -127,11 +127,9 @@ def test_ingest_without_embedding_service(tmp_path, monkeypatch):
     assert row["status"] == "done", row["message"]
     assert row["started_at"] and row["finished_at"] and row["started_at"] <= row["finished_at"]
 
-    res = search.search("质保期", "keyword")["results"]
-    assert len(res) == 1
-    client = TestClient(main.app)
-    hl = client.get(f"/api/chunks/{res[0]['chunk_id']}/highlights", params={"q": "质保期"}).json()
-    assert hl["exact"] and len(hl["boxes"]) == 1
+    assert search.search("质保期")["total_hits"] == 1
+    hl = TestClient(main.app).get(f"/api/documents/{doc['id']}/highlights", params={"q": "质保期"}).json()
+    assert [h["exact"] for h in hl["hits"]] == [True] and len(hl["hits"][0]["boxes"]) == 1
 
 
 def test_failure_records_finish_time(tmp_path, monkeypatch):
@@ -144,9 +142,30 @@ def test_failure_records_finish_time(tmp_path, monkeypatch):
 
 def test_highlights_fall_back_to_paragraph():
     from conftest import add_chunk
-    cid = add_chunk(add_doc(), "质保期三年")  # 没有 PDF 文件（相当于扫描页找不到文字层）
-    hl = TestClient(main.app).get(f"/api/chunks/{cid}/highlights", params={"q": "质保期"}).json()
-    assert hl == {"doc_id": hl["doc_id"], "boxes": [[0, 0, 0, 10, 10]], "exact": False, "ocr": False}
+    doc = add_doc()
+    cid = add_chunk(doc, "质保期三年")  # 没有 PDF 文件（相当于扫描页找不到文字层）
+    hl = TestClient(main.app).get(f"/api/documents/{doc}/highlights", params={"q": "质保期"}).json()
+    assert hl == {"doc_id": doc, "hits": [{"chunk_id": cid, "boxes": [[0, 0, 0, 10, 10]], "exact": False}], "ocr": False}
+
+
+def test_document_highlights_in_reading_order(tmp_path):
+    """一个文件里多处命中：全部返回，按页码、从上到下排列；跨行的一处有两个框。"""
+    import pymupdf
+    d = pymupdf.open()
+    for i in range(2):
+        page = d.new_page()
+        page.insert_text((60, 300), f"第{i + 1}页下方：质保期", fontname="china-s", fontsize=12)
+        page.insert_text((60, 100), f"第{i + 1}页上方：质保期", fontname="china-s", fontsize=12)
+    page.insert_textbox(pymupdf.Rect(60, 500, 150, 560), "一二三四五六质保期", fontname="china-s", fontsize=12)
+    path = tmp_path / "multi.pdf"
+    d.save(path)
+    doc = ingest.register_file(path, "multi.pdf")
+    ingest.Worker()._step()
+    hl = TestClient(main.app).get(f"/api/documents/{doc['id']}/highlights", params={"q": "质保期"}).json()
+    firsts = [(h["boxes"][0][0], h["boxes"][0][2]) for h in hl["hits"]]
+    assert firsts == sorted(firsts) and len(firsts) == 5
+    assert [len(h["boxes"]) for h in hl["hits"]].count(2) == 1  # 最后一处折行
+    assert all(h["exact"] for h in hl["hits"])
 
 
 def test_reindex_all_and_old_db_migration():

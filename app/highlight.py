@@ -72,40 +72,53 @@ def _merge(hits: list[tuple[int, pymupdf.Rect]]) -> list[list[float]]:
     return [[pg, *(round(v, 1) for v in r)] for pg, r in groups]
 
 
-def keyword_boxes(pdf_path, regions: list[list[float]], terms: list[str],
-                  ocr_lines: dict[int, list] | None = None) -> list[list[float]]:
-    """regions：片段所在的文字块 [[page, x0, y0, x1, y1], ...]；ocr_lines：OCR 页的文字行。返回关键字框，同样格式。"""
-    terms = [t for t in (normalize_term(t) for t in terms) if t]
-    if not terms or not regions:
-        return []
-    doc = pymupdf.open(pdf_path)
-    try:
-        page_chars: dict[int, list] = {}
-        chars: list[str] = []
-        boxes: list[tuple[int, pymupdf.Rect]] = []
-        for pg, x0, y0, x1, y1 in regions:
-            pg = int(pg)
-            if not 0 <= pg < doc.page_count:
-                continue
-            ocr = (ocr_lines or {}).get(pg)
-            if pg not in page_chars:
-                # OCR 过的页以识别结果为准（扫描页没有文字层，乱码页的文字层不可信）
-                page_chars[pg] = _ocr_chars(ocr) if ocr else _page_chars(doc[pg])
-            pad = 4 if ocr else 2  # OCR 的段落框和行框来自不同步骤，多留点余量
-            area = pymupdf.Rect(x0, y0, x1, y1) + (-pad, -pad, pad, pad)
-            for c, r in page_chars[pg]:
-                if (r.tl + r.br) / 2 in area:
-                    chars.append(c)
-                    boxes.append((pg, r))
-    finally:
-        doc.close()
+def _chunk_matches(doc: pymupdf.Document, cache: dict, regions: list[list[float]], terms: list[str],
+                   ocr_lines: dict[int, list]) -> list[list[list[float]]]:
+    """一个片段里的每处命中，每处是一组框（跨行时有多个）。"""
+    chars: list[str] = []
+    boxes: list[tuple[int, pymupdf.Rect]] = []
+    for pg, x0, y0, x1, y1 in regions:
+        pg = int(pg)
+        if not 0 <= pg < doc.page_count:
+            continue
+        ocr = ocr_lines.get(pg)
+        if pg not in cache:
+            # OCR 过的页以识别结果为准（扫描页没有文字层，乱码页的文字层不可信）
+            cache[pg] = _ocr_chars(ocr) if ocr else _page_chars(doc[pg])
+        pad = 4 if ocr else 2  # OCR 的段落框和行框来自不同步骤，多留点余量
+        area = pymupdf.Rect(x0, y0, x1, y1) + (-pad, -pad, pad, pad)
+        for c, r in cache[pg]:
+            if (r.tl + r.br) / 2 in area:
+                chars.append(c)
+                boxes.append((pg, r))
 
     text = "".join(chars)
-    out: list[list[float]] = []
+    found: dict[tuple, list[list[float]]] = {}
     for t in terms:
         i = text.find(t)
         while i >= 0:
-            out += _merge(boxes[i:i + len(t)])
+            m = _merge(boxes[i:i + len(t)])
+            found.setdefault(tuple(m[0]), m)
             i = text.find(t, i + len(t))
-    uniq = {tuple(b): b for b in out}
-    return sorted(uniq.values(), key=lambda b: (b[0], b[2], b[1]))
+    return sorted(found.values(), key=lambda m: (m[0][0], m[0][2], m[0][1]))
+
+
+def keyword_matches(pdf_path, chunks: list[list[list[float]]], terms: list[str],
+                    ocr_lines: dict[int, list] | None = None) -> list[list[list[list[float]]]]:
+    """chunks：每个片段的文字块 [[page, x0, y0, x1, y1], ...]；返回每个片段的命中列表，顺序和 chunks 一致。"""
+    terms = [t for t in (normalize_term(t) for t in terms) if t]
+    if not terms:
+        return [[] for _ in chunks]
+    doc = pymupdf.open(pdf_path)
+    try:
+        cache: dict[int, list] = {}
+        return [_chunk_matches(doc, cache, regions, terms, ocr_lines or {}) for regions in chunks]
+    finally:
+        doc.close()
+
+
+def keyword_boxes(pdf_path, regions: list[list[float]], terms: list[str],
+                  ocr_lines: dict[int, list] | None = None) -> list[list[float]]:
+    """单个片段的所有关键字框（不分组）。"""
+    [matches] = keyword_matches(pdf_path, [regions], terms, ocr_lines)
+    return sorted((b for m in matches for b in m), key=lambda b: (b[0], b[2], b[1]))

@@ -36,3 +36,8 @@ def add_chunk(doc_id: int, text: str, heading: str = "") -> int:
         conn.execute("INSERT INTO chunks_fts(rowid, tokens) VALUES (?, ?)",
                      (cur.lastrowid, textproc.index_tokens(f"{heading}\n{text}")))
         return cur.lastrowid
+
+
+def chunk_ids(result: dict) -> list[int]:
+    """检索结果里的全部片段 id（按文件分组后的顺序）。"""
+    return [c["chunk_id"] for d in result["docs"] for c in d["chunks"]]

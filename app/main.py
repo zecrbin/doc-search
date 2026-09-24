@@ -118,7 +118,7 @@ def document_file(doc_id: int):
 
 @app.get("/api/search")
 def do_search(q: str = Query(..., min_length=1, max_length=500), mode: str = "keyword",
-              top_k: int = Query(20, ge=1, le=500), doc_id: int | None = None):
+              top_k: int = Query(100, ge=1, le=500), doc_id: int | None = None):
     if mode not in search.MODES:
         raise HTTPException(400, f"mode 只能是 {search.MODES}")
     try:
@@ -127,25 +127,37 @@ def do_search(q: str = Query(..., min_length=1, max_length=500), mode: str = "ke
         raise HTTPException(503, str(e))
 
 
-@app.get("/api/chunks/{chunk_id}/highlights")
-def chunk_highlights(chunk_id: int, q: str = Query(..., min_length=1, max_length=500)):
-    """片段在原文 PDF 上的关键字框。找不到（扫描页没有文字层）时退回整段的框，exact=false。"""
+@app.get("/api/documents/{doc_id}/highlights")
+def document_highlights(doc_id: int, q: str = Query(..., min_length=1, max_length=500)):
+    """文档里每处命中在原文 PDF 上的位置，按阅读顺序排列。
+
+    hits：[{chunk_id, boxes: [[page, x0, y0, x1, y1], ...], exact}]，一处命中跨行时有多个框。
+    扫描页没有文字层、也没有 OCR 行坐标时找不到关键字，退回整段的框（exact=false）。
+    """
+    terms = search.terms_of(q)
     with db.session() as conn:
-        row = conn.execute("SELECT c.doc_id, c.regions, d.pdf_path FROM chunks c JOIN documents d ON d.id = c.doc_id"
-                           " WHERE c.id=?", (chunk_id,)).fetchone()
-    if not row:
-        raise HTTPException(404, "片段不存在，请重新检索")
-    regions = json.loads(row["regions"])
-    boxes, ocr_lines = [], {}
-    if row["pdf_path"] and Path(row["pdf_path"]).exists():
+        doc = _doc_or_404(conn, doc_id)
+        ids = search._keyword(conn, terms, doc_id)
+        rows = search._load(conn, ids)
+    chunks = [(cid, json.loads(rows[cid]["regions"])) for cid in ids if cid in rows]
+    per_chunk = [[] for _ in chunks]
+    ocr_lines = {}
+    if doc["pdf_path"] and Path(doc["pdf_path"]).exists():
         try:
-            ocr_lines = ingest.load_ocr_lines(row["doc_id"])
-            boxes = highlight.keyword_boxes(row["pdf_path"], regions, q.split(), ocr_lines)
+            ocr_lines = ingest.load_ocr_lines(doc_id)
+            per_chunk = highlight.keyword_matches(doc["pdf_path"], [r for _, r in chunks], terms, ocr_lines)
         except Exception:
-            log.exception("关键字定位失败 chunk=%s", chunk_id)
-    # ocr：关键字位置是按 OCR 行坐标估算的（扫描件）
-    ocr = bool(boxes) and any(int(b[0]) in ocr_lines for b in boxes)
-    return {"doc_id": row["doc_id"], "boxes": boxes or regions, "exact": bool(boxes), "ocr": ocr}
+            log.exception("关键字定位失败 doc=%s", doc_id)
+    hits = []
+    for (cid, regions), matches in zip(chunks, per_chunk):
+        if matches:
+            hits += [{"chunk_id": cid, "boxes": m, "exact": True} for m in matches]
+        elif any(t in rows[cid]["text"].lower() for t in terms):  # 只靠文件名命中的词不用框
+            hits.append({"chunk_id": cid, "boxes": regions, "exact": False})
+    hits.sort(key=lambda h: (h["boxes"][0][0], h["boxes"][0][2], h["boxes"][0][1]))
+    # ocr：有关键字位置是按 OCR 行坐标估算的（扫描件）
+    ocr = any(h["exact"] and int(h["boxes"][0][0]) in ocr_lines for h in hits)
+    return {"doc_id": doc_id, "hits": hits, "ocr": ocr}
 
 
 @app.get("/api/health")

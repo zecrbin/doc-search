@@ -19,12 +19,9 @@
   <main class="layout" id="viewSearch">
     <aside class="search-pane">
       <form id="searchForm" class="search-box">
-        <input id="q" type="search" placeholder="输入要查找的原文，如：项目编号、质保期；多个词用空格分隔" autocomplete="off" autofocus>
+        <input id="q" type="search" placeholder="在全部文件的正文和文件名里查找，如：项目编号、质保期" autocomplete="off" autofocus>
         <button class="btn primary" type="submit">检索</button>
       </form>
-      <div class="filters">
-        <select id="docFilter"><option value="">全部文档</option></select>
-      </div>
       <div class="meta" id="meta"></div>
       <ol class="results" id="results"></ol>
     </aside>
@@ -33,7 +30,11 @@
       <div class="viewer-bar" id="viewerBar" hidden>
         <span class="viewer-title" id="viewerTitle"></span>
         <span class="viewer-note" id="viewerNote" hidden></span>
-        <span class="viewer-hits" id="viewerHits"></span>
+        <span class="hit-nav" id="hitNav" hidden>
+          <button class="btn small" id="prevHit" title="上一处（Shift+F3）">‹ 上一处</button>
+          <span id="hitPos"></span>
+          <button class="btn small" id="nextHit" title="下一处（F3）">下一处 ›</button>
+        </span>
         <span class="viewer-page" id="viewerPage"></span>
         <a class="btn small" id="downloadOrig" href="#" download>下载原文</a>
       </div>

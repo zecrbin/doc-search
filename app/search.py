@@ -1,4 +1,7 @@
-"""检索：BM25（jieba 分词 + FTS5）与向量（sqlite-vec）用 RRF 融合，原文精确命中加分，可选重排，折叠重复段落。"""
+"""检索：默认精确模式——原文逐字包含查询词，文件名也参与匹配；结果按文件分组。
+
+可选语义模式（DOCSEARCH_SEMANTIC=1）：BM25（jieba 分词 + FTS5）与向量（sqlite-vec）用 RRF 融合，可选重排。
+"""
 import json
 import time
 
@@ -8,22 +11,30 @@ from . import config, db, embedder, textproc
 
 RRF_K = 60
 CANDIDATES = 100
-KEYWORD_LIMIT = 1000  # 精确模式最多取多少个命中片段（折叠重复段落前）
+KEYWORD_LIMIT = 2000  # 精确模式最多统计多少个命中段落
 MODES = ("keyword", "hybrid", "semantic") if config.SEMANTIC else ("keyword",)
 
 
-def search(q: str, mode: str = "keyword", top_k: int = 20, doc_id: int | None = None) -> dict:
+def terms_of(q: str) -> list[str]:
+    """查询词：空格分隔，不区分大小写。"""
+    return list(dict.fromkeys(t for t in q.lower().split() if t))
+
+
+def search(q: str, mode: str = "keyword", top_k: int = 100, doc_id: int | None = None) -> dict:
+    """返回按文件分组的结果：每个文件列出命中的段落（按页码排序）和命中次数。top_k 是最多返回几个文件。"""
     t0 = time.time()
     q = q.strip()
     tokens = textproc.query_tokens(q)
-    terms = [t for t in q.lower().split() if t]
+    terms = terms_of(q)
     scores: dict[int, float] = {}
     reranked = False
     semantic_ok = True
+    truncated = False
 
     with db.session() as conn:
         if mode == "keyword":
             ids = _keyword(conn, terms, doc_id)
+            truncated = len(ids) >= KEYWORD_LIMIT
             for rank, cid in enumerate(ids):
                 scores[cid] = 1 / (RRF_K + rank + 1)
         else:
@@ -55,42 +66,55 @@ def search(q: str, mode: str = "keyword", top_k: int = 20, doc_id: int | None = 
             if rr:
                 reranked = True
                 head.sort(key=lambda c: rr.get(str(c), -1e9), reverse=True)
-                for c in head:
-                    scores[c] = rr.get(str(c), scores[c])
                 ranked = head + ranked[30:]
 
-        # 相同段落（text_hash 相同）只保留最相关的一条，其余作为"也出现在"
-        results, seen = [], set()
-        for cid in ranked:
-            r = rows[cid]
-            if r["text_hash"] in seen:
-                continue
-            seen.add(r["text_hash"])
-            results.append(cid)
-            if len(results) >= top_k:
-                break
-        dups = _duplicates(conn, [rows[c]["text_hash"] for c in results])
+        name_hits = _filename_hits(conn, terms, doc_id) if terms else {}
 
-        out = []
-        for cid in results:
-            r = rows[cid]
-            regions = json.loads(r["regions"])
-            out.append({
-                "chunk_id": cid,
-                "doc_id": r["doc_id"],
-                "filename": r["filename"],
-                "kind": r["kind"],
-                "heading": r["heading"],
-                "text": r["text"],
-                "page": r["page_start"] + 1,
-                "pages": sorted({int(g[0]) + 1 for g in regions}),
-                "regions": regions,
-                "score": round(scores[cid], 4),
-                "duplicates": [d for d in dups.get(r["text_hash"], []) if d["chunk_id"] != cid],
-            })
+    docs: dict[int, dict] = {}
+    for rank, cid in enumerate(ranked):
+        r = rows[cid]
+        low = r["text"].lower()
+        count = sum(low.count(t) for t in terms)
+        d = docs.setdefault(r["doc_id"], {"doc_id": r["doc_id"], "filename": r["filename"], "rank": rank,
+                                          "hit_count": 0, "chunks": []})
+        d["hit_count"] += count
+        regions = json.loads(r["regions"])
+        d["chunks"].append({
+            "chunk_id": cid,
+            "seq": r["seq"],
+            "kind": r["kind"],
+            "heading": r["heading"],
+            "text": r["text"],
+            "page": r["page_start"] + 1,
+            "pages": sorted({int(g[0]) + 1 for g in regions}),
+            "count": count,
+        })
+    for did, filename in name_hits.items():
+        docs.setdefault(did, {"doc_id": did, "filename": filename, "rank": len(ranked), "hit_count": 0, "chunks": []})
+    for d in docs.values():
+        d["filename_match"] = d["doc_id"] in name_hits
+        d["chunks"].sort(key=lambda c: (c["page"], c["seq"]))
 
-    return {"query": q, "mode": mode, "tokens": tokens, "reranked": reranked, "semantic_ok": semantic_ok,
-            "took_ms": int((time.time() - t0) * 1000), "results": out}
+    if mode == "keyword":  # 文件名命中的排前面，其次按正文命中次数
+        order = sorted(docs.values(), key=lambda d: (not d["filename_match"], -d["hit_count"], d["filename"]))
+    else:
+        order = sorted(docs.values(), key=lambda d: (not d["filename_match"], d["rank"]))
+    out = [{k: v for k, v in d.items() if k != "rank"} for d in order[:top_k]]
+    return {"query": q, "terms": terms, "mode": mode, "tokens": tokens, "reranked": reranked,
+            "semantic_ok": semantic_ok, "truncated": truncated,
+            "total_docs": len(order), "total_hits": sum(d["hit_count"] for d in order),
+            "took_ms": int((time.time() - t0) * 1000), "docs": out}
+
+
+def _filename_hits(conn, terms: list[str], doc_id) -> dict[int, str]:
+    """文件名逐字包含全部查询词的文档。"""
+    sql = "SELECT id, filename FROM documents WHERE status='done' AND " + " AND ".join(
+        "instr(lower(filename), ?) > 0" for _ in terms)
+    args: list = list(terms)
+    if doc_id:
+        sql += " AND id = ?"
+        args.append(doc_id)
+    return {r[0]: r[1] for r in conn.execute(sql, args)}
 
 
 def _fts(conn, match: str, doc_id, limit: int) -> list[int]:
@@ -107,23 +131,27 @@ def _fts(conn, match: str, doc_id, limit: int) -> list[int]:
 
 
 def _keyword(conn, terms: list[str], doc_id) -> list[int]:
-    """精确模式：原文必须逐字包含每个查询词，按出现次数排序。
+    """精确模式：段落里逐字包含查询词，按出现次数排序。
 
+    多个词时，每个词要么出现在这一段，要么出现在文件名里（如"扫描件 质保期"），且至少一个词出现在这一段。
     不能用 FTS 预筛：jieba 在不同上下文里切分不同（"质保期" 切成 质保/期，"质保期限" 切成 质保/期限），会漏掉逐字命中的片段。
     """
     if not terms:
         return []
     args: dict = {"limit": KEYWORD_LIMIT}
-    where, counts = [], []
+    each, any_in_text, counts = [], [], []
     for i, t in enumerate(terms):
         args[f"t{i}"] = t
-        where.append(f"instr(lower(text), :t{i}) > 0")
-        counts.append(f"(length(lower(text)) - length(replace(lower(text), :t{i}, ''))) / length(:t{i})")
+        in_text = f"instr(lower(c.text), :t{i}) > 0"
+        each.append(f"({in_text} OR instr(lower(d.filename), :t{i}) > 0)" if len(terms) > 1 else in_text)
+        any_in_text.append(in_text)
+        counts.append(f"(length(lower(c.text)) - length(replace(lower(c.text), :t{i}, ''))) / length(:t{i})")
+    where = each + ([f"({' OR '.join(any_in_text)})"] if len(terms) > 1 else [])
     if doc_id:
-        where.append("doc_id = :doc_id")
+        where.append("c.doc_id = :doc_id")
         args["doc_id"] = doc_id
-    sql = (f"SELECT id FROM chunks WHERE {' AND '.join(where)}"
-           f" ORDER BY {' + '.join(counts)} DESC, id LIMIT :limit")
+    sql = (f"SELECT c.id FROM chunks c JOIN documents d ON d.id = c.doc_id WHERE {' AND '.join(where)}"
+           f" ORDER BY {' + '.join(counts)} DESC, c.id LIMIT :limit")
     return [r[0] for r in conn.execute(sql, args)]
 
 
@@ -144,18 +172,3 @@ def _load(conn, ids: list[int]) -> dict[int, dict]:
     rows = conn.execute(
         f"SELECT c.*, d.filename FROM chunks c JOIN documents d ON d.id = c.doc_id WHERE c.id IN ({marks})", ids)
     return {r["id"]: dict(r) for r in rows}
-
-
-def _duplicates(conn, hashes: list[str]) -> dict[str, list[dict]]:
-    if not hashes:
-        return {}
-    marks = ",".join("?" * len(hashes))
-    out: dict[str, list[dict]] = {}
-    for r in conn.execute(
-        f"SELECT c.id, c.text_hash, c.doc_id, c.page_start, c.regions, d.filename FROM chunks c"
-        f" JOIN documents d ON d.id = c.doc_id WHERE c.text_hash IN ({marks}) ORDER BY d.filename", hashes):
-        out.setdefault(r["text_hash"], []).append({
-            "chunk_id": r["id"], "doc_id": r["doc_id"], "filename": r["filename"],
-            "page": r["page_start"] + 1, "regions": json.loads(r["regions"]),
-        })
-    return out
