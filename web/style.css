@@ -109,8 +109,12 @@ body { margin: 0; background: var(--bg); height: 100vh; display: flex; flex-dire
 .hit.expanded .hit-full { display: block; }
 .hit-none { padding: 8px 14px 10px; color: var(--muted); font-size: 12px; }
 .results mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1px; }
-.more { border: 0; background: none; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; padding: 2px 14px 10px; }
-.more[disabled] { color: var(--muted); cursor: default; }
+.doc-foot { display: flex; gap: 16px; padding: 2px 14px 10px; font-size: 12px; }
+.doc-foot:empty { display: none; }
+.more { border: 0; background: none; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; padding: 0; }
+.more:hover { text-decoration: underline; }
+/* 收起：只留前 5 段（和后端 search.PREVIEW 一致），右侧正在看的那段照常显示 */
+.doc.collapsed .hit:nth-child(n+6):not(.current) { display: none; }
 .hint { color: var(--muted); padding: 32px 16px; text-align: center; line-height: 1.8; }
 
 /* 原文预览 */

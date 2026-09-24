@@ -204,18 +204,41 @@ function renderResults(data) {
   }
   const hl = highlighter(data.terms);
   ol.innerHTML = data.docs.map((d, i) => {
-    const rest = d.chunk_count - d.chunks.length;
-    const more = rest > 0 ? `<button class="more" type="button">还有 ${rest} 段命中，展开</button>` : "";
+    Object.assign(d, { preview: d.chunks.length, collapsed: false, loading: false, error: null });
     return `<li class="doc" data-idx="${i}">
       <div class="doc-head">
         <span class="doc-name" title="${esc(d.filename)}">${hl(d.filename)}</span>
         ${d.filename_match ? '<span class="tag name">文件名命中</span>' : ""}
         <span class="doc-count">${d.hit_count ? `${d.chunk_count} 段 · ${d.hit_count} 处` : ""}</span>
       </div>
-      ${d.chunks.length ? `<ol class="hits">${d.chunks.map((c) => hitHtml(c, hl, data.terms)).join("")}</ol>${more}`
+      ${d.chunks.length ? `<ol class="hits">${d.chunks.map((c) => hitHtml(c, hl, data.terms)).join("")}</ol>
+        <div class="doc-foot">${footHtml(d)}</div>`
         : '<div class="hit-none">正文里没有查询词，只有文件名命中</div>'}
     </li>`;
   }).join("");
+}
+
+// 卡片底部：继续展开 / 收起 / 展开全部。收起时只显示前 preview 段（样式见 .doc.collapsed），数据不丢，再展开不用重新加载
+function footHtml(d) {
+  if (d.loading) return '<span class="muted">加载中…</span>';
+  const rest = d.chunk_count - d.chunks.length;
+  if (d.collapsed) return `<button class="more" type="button" data-act="expand">展开全部 ${d.chunk_count} 段</button>`;
+  const btns = [];
+  if (rest > 0) {
+    const label = d.error ? `加载失败（${esc(d.error)}），点击重试`
+      : d.chunks.length > d.preview ? `还有 ${rest} 段，继续展开` : `还有 ${rest} 段命中，展开`;
+    btns.push(`<button class="more" type="button" data-act="more">${label}</button>`);
+  }
+  if (d.chunks.length > d.preview) btns.push('<button class="more" type="button" data-act="collapse">收起</button>');
+  return btns.join("");
+}
+
+function renderFoot(idx) {
+  const d = state.data.docs[idx];
+  const card = document.querySelector(`#results .doc[data-idx="${idx}"]`);
+  if (!card) return;
+  card.classList.toggle("collapsed", d.collapsed);
+  card.querySelector(".doc-foot").innerHTML = footHtml(d);
 }
 
 function hitHtml(c, hl, terms) {
@@ -232,38 +255,38 @@ function hitHtml(c, hl, terms) {
 // 展开：从后端接着取这个文件剩下的段落，一次 MORE_PAGE 段，直到取完
 // 同一个文件同时只加载一批（手动点"展开"和右侧跳转触发的自动展开可能撞在一起）
 const moreLoading = new Map();
-function loadMore(idx, btn) {
+function loadMore(idx) {
   if (!moreLoading.has(idx)) {
-    moreLoading.set(idx, loadMoreOnce(idx, btn).finally(() => moreLoading.delete(idx)));
+    moreLoading.set(idx, loadMoreOnce(idx).finally(() => moreLoading.delete(idx)));
   }
   return moreLoading.get(idx);
 }
 
 // 返回是否加载到了新段落
-async function loadMoreOnce(idx, btn) {
+async function loadMoreOnce(idx) {
   const data = state.data;
   const d = data.docs[idx];
-  btn.disabled = true;
-  btn.textContent = "加载中…";
+  if (d.chunks.length >= d.chunk_count) return false;
+  d.loading = true;
+  d.error = null;
+  renderFoot(idx);
   try {
     const res = await api(`/api/documents/${d.doc_id}/hits?${new URLSearchParams({ q: data.query, offset: d.chunks.length, limit: MORE_PAGE })}`);
     if (state.data !== data) return false; // 期间又检索了别的
     d.chunks.push(...res.chunks);
-    d.chunk_count = res.total;
+    d.chunk_count = res.chunks.length ? res.total : d.chunks.length; // 期间文件被重新解析、段落变少了
     const hl = highlighter(data.terms);
-    btn.previousElementSibling.insertAdjacentHTML("beforeend", res.chunks.map((c) => hitHtml(c, hl, data.terms)).join(""));
-    const rest = res.total - d.chunks.length;
-    if (rest > 0 && res.chunks.length) {
-      btn.disabled = false;
-      btn.textContent = `还有 ${rest} 段命中，继续展开`;
-    } else {
-      btn.remove();
-    }
+    document.querySelector(`#results .doc[data-idx="${idx}"] .hits`)
+      .insertAdjacentHTML("beforeend", res.chunks.map((c) => hitHtml(c, hl, data.terms)).join(""));
     return res.chunks.length > 0;
   } catch (err) {
-    btn.disabled = false;
-    btn.textContent = `加载失败（${err.message}），点击重试`;
+    d.error = err.message;
     return false;
+  } finally {
+    if (state.data === data) {
+      d.loading = false;
+      renderFoot(idx);
+    }
   }
 }
 
@@ -271,12 +294,24 @@ $("#results").addEventListener("click", (e) => {
   const li = e.target.closest(".doc");
   if (!li) return;
   const idx = +li.dataset.idx;
-  const moreBtn = e.target.closest(".more");
-  if (moreBtn) {
-    // 新加载的段落里可能有右侧正在看的那段
-    loadMore(idx, moreBtn).then(() => state.active === idx && viewer.cur >= 0 && markCurrent());
+  const act = e.target.closest("[data-act]")?.dataset.act;
+  if (act) {
+    const d = state.data.docs[idx];
+    if (act === "collapse") {
+      d.collapsed = true;
+      renderFoot(idx);
+      // 收起后卡片可能整个跑到上面去了，滚回来
+      li.scrollIntoView({ block: "nearest" });
+    } else if (act === "expand") {
+      d.collapsed = false;
+      renderFoot(idx);
+    } else {
+      // 新加载的段落里可能有右侧正在看的那段
+      loadMore(idx).then(() => state.active === idx && viewer.cur >= 0 && markCurrent());
+    }
     return;
   }
+  if (e.target.closest(".doc-foot")) return;
   const hit = e.target.closest(".hit");
   if (hit) {
     // 再点一次正在看的段落：展开/收起全文
@@ -396,11 +431,12 @@ function markCurrent(scroll = false) {
     if (!on) el.classList.remove("expanded");
     if (on && scroll) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
   });
-  // 右侧跳到的段落左侧还没展开：自动展开（一批一批加载，直到这段出现），再标出来
-  const btn = document.querySelector(`#results .doc[data-idx="${state.active}"] .more`);
-  if (h && !found && btn) {
+  // 右侧跳到的段落左侧还没加载：自动加载（一批一批，直到这段出现），再标出来。
+  // 卡片收起着也没关系：正在看的那段不受收起影响，照常显示
+  const d = state.active === null ? null : state.data?.docs[state.active];
+  if (h && !found && d && d.chunks.length < d.chunk_count) {
     const idx = state.active;
-    loadMore(idx, btn).then((loaded) => {
+    loadMore(idx).then((loaded) => {
       if (loaded && state.active === idx && viewer.hits[viewer.cur] === h) markCurrent(scroll);
     });
   }
