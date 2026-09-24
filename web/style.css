@@ -209,6 +209,11 @@ dialog.summary-dlg::backdrop { background: rgba(20, 30, 50, .35); }
 .sum-title span { color: var(--muted); font-size: 13px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sum-status { font-size: 13px; color: var(--muted); background: #f5f6f8; border-radius: 6px; padding: 6px 10px; }
 .sum-status.bad { color: var(--bad); background: #fdf3f3; }
+.sum-prog { display: flex; align-items: center; gap: 10px; margin: 2px 0 6px; }
+.sum-prog .bar { flex: 1; height: 6px; }
+.sum-prog b { color: var(--accent); font-variant-numeric: tabular-nums; min-width: 38px; text-align: right; }
+.sum-body.drafting::after { content: "▍"; color: var(--accent); animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
 .sum-body { overflow-y: auto; line-height: 1.75; font-size: 14px; padding-right: 4px; }
 .sum-body:empty { display: none; }
 .sum-body h3 { font-size: 15px; margin: 14px 0 6px; padding-left: 8px; border-left: 3px solid var(--accent); }

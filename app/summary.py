@@ -4,6 +4,7 @@
 最后按固定格式写成概述。单独的后台线程处理，不耽误文档解析和检索。
 """
 import logging
+import math
 import threading
 import time
 
@@ -79,39 +80,64 @@ def split_text(text: str, size: int) -> list[str]:
     return parts
 
 
-def summarize(name: str, text: str, progress=lambda msg: None) -> str:
+def summarize(name: str, text: str, report=lambda msg, frac, draft=None: None) -> str:
+    """report(说明, 整体进度 0～1, 概述草稿)：进度回调，生成最后的概述时带上已生成的部分。"""
     size = llm.chunk_chars()
     while True:
         try:
-            return _summarize(name, text, size, progress)
+            return _summarize(name, text, size, report)
         except llm.ContextOverflow:  # 估算偏大或服务端上下文比报告的小：分段减半重试，直到每段不足 1000 字
             if size <= 1000:
                 raise RuntimeError("原文分段后仍超出大模型上下文长度：请调大 llama-server 的 -c 参数，"
                                    "或设置 DOCSEARCH_LLM_CHUNK_CHARS 为更小的值")
             size //= 2
             log.info("%s：超出上下文，改为每段 %d 字重试", name, size)
-            progress(f"超出上下文，改为每段 {size} 字重试")
+            report(f"超出上下文，改为每段 {size} 字重试", 0)
 
 
-def _summarize(name: str, text: str, size: int, progress) -> str:
-    if len(text) <= size:
-        progress("生成概述")
-        return llm.chat(SYSTEM, FINAL_FROM_TEXT.format(name=name, format=FORMAT, text=text))
-    parts = split_text(text, size)
-    notes = []
-    for i, part in enumerate(parts, 1):
-        progress(f"分析第 {i}/{len(parts)} 部分")
-        notes.append(f"【第 {i} 部分】\n" + llm.chat(SYSTEM, EXTRACT.format(name=name, i=i, n=len(parts), text=part)))
+# 估算步内进度：输出越多越接近完成，按 1 - e^(-字数/常数) 增长（400 字的要点约 55%，800 字的概述约 70%），
+# 输出长短不一也不会卡住或提前到 100%
+_EXPECT_NOTES, _EXPECT_SUMMARY = 500, 650
+
+
+def _summarize(name: str, text: str, size: int, report) -> str:
+    parts = split_text(text, size) if len(text) > size else [text]
+    plan = {"total": len(parts) + 1 if len(parts) > 1 else 1, "done": 0, "floor": 0.0}
+
+    def emit(msg, frac, draft=None):
+        # 要点需要额外合并时总步数会变多，按步数算的进度可能回退：只进不退
+        plan["floor"] = max(plan["floor"], frac)
+        report(msg, plan["floor"], draft)
+
+    def step(label: str, prompt: str, expect: int, draft: bool = False) -> str:
+        i, total = plan["done"], plan["total"]
+        head = f"第 {i + 1}/{total} 步：{label}" if total > 1 else label
+        # 模型先读完输入（量化大模型读一万多字可能要一两分钟）才开始输出
+        emit(f"{head} · 读取原文中（{len(prompt)} 字）", i / total)
+
+        def on(chars, out, thinking):
+            what = f"思考中（{thinking} 字）" if thinking and not chars else f"已输出 {chars} 字"
+            emit(f"{head} · {what}", (i + min(0.95, 1 - math.exp(-chars / expect))) / total, out if draft else None)
+
+        result = llm.chat(SYSTEM, prompt, on_progress=on)
+        plan["done"] += 1
+        return result
+
+    if len(parts) == 1:
+        return step("生成概述", FINAL_FROM_TEXT.format(name=name, format=FORMAT, text=text), _EXPECT_SUMMARY, True)
+    notes = [f"【第 {i} 部分】\n" + step(f"分析第 {i}/{len(parts)} 部分",
+                                        EXTRACT.format(name=name, i=i, n=len(parts), text=p), _EXPECT_NOTES)
+             for i, p in enumerate(parts, 1)]
     merged = "\n\n".join(notes)
     for _ in range(3):  # 要点本身也放不下：分组合并压缩，直到放得下（最多 3 轮，模型压不下来就截断）
         if len(merged) <= size:
             break
         groups = split_text(merged, size)
-        progress(f"合并要点（{len(groups)} 组）")
-        merged = "\n\n".join(llm.chat(SYSTEM, MERGE.format(name=name, text=g)) for g in groups)
+        plan["total"] += len(groups)
+        merged = "\n\n".join(step(f"合并要点 {j}/{len(groups)}", MERGE.format(name=name, text=g), _EXPECT_NOTES)
+                               for j, g in enumerate(groups, 1))
     merged = merged[:size]
-    progress("生成概述")
-    return llm.chat(SYSTEM, FINAL_FROM_NOTES.format(name=name, format=FORMAT, text=merged))
+    return step("生成概述", FINAL_FROM_NOTES.format(name=name, format=FORMAT, text=merged), _EXPECT_SUMMARY, True)
 
 
 def queue(conn, where: str, args=()) -> int:
@@ -160,21 +186,29 @@ class Worker(threading.Thread):
                                     (*fields.values(), doc_id)).rowcount > 0
 
         with db.session() as conn:
-            conn.execute("UPDATE documents SET summary_status='running', summary_message='准备中' WHERE id=?", (doc_id,))
-        def progress(msg):
-            if not set_(summary_message=msg):
+            conn.execute("UPDATE documents SET summary_status='running', summary_message='准备中', summary_progress=0,"
+                         " summary_draft=NULL, summary_started_at=? WHERE id=?", (time.strftime("%Y-%m-%d %H:%M:%S"), doc_id))
+        last = {"t": 0.0, "head": None}
+
+        def report(msg, frac, draft=None):
+            # 流式输出每几个字就回调一次，写库限流到每秒一次；换步骤时立即写
+            head, now = msg.split(" · ")[0], time.monotonic()
+            if head == last["head"] and now - last["t"] < 1:
+                return
+            last.update(t=now, head=head)
+            if not set_(summary_message=msg, summary_progress=round(frac, 3), summary_draft=draft):
                 raise _Cancelled
 
         t0 = time.time()
         try:
-            text = summarize(name, document_text(doc_id), progress)
+            text = summarize(name, document_text(doc_id), report)
         except _Cancelled:
             return
         except Exception as e:
             log.warning("生成概述失败：%s：%s", name, e)
-            set_(summary_status="failed", summary_message=str(e)[:500])
+            set_(summary_status="failed", summary_message=str(e)[:500], summary_draft=None)
             return
-        if set_(summary=text, summary_status="done", summary_message=None,
+        if set_(summary=text, summary_status="done", summary_message=None, summary_progress=1, summary_draft=None,
                 summary_at=time.strftime("%Y-%m-%d %H:%M:%S")):
             log.info("%s：概述已生成，%.0fs", name, time.time() - t0)
 

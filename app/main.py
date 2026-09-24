@@ -85,7 +85,7 @@ def list_documents(page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, 
         total = conn.execute(f"SELECT count(*) FROM documents WHERE {where}", args).fetchone()[0]
         items = [dict(r) for r in conn.execute(
             "SELECT id, filename, ext, size, pages, ocr_pages, chunk_count, status, progress, message,"
-            " created_at, updated_at, started_at, finished_at, summary_status, summary_message,"
+            " created_at, updated_at, started_at, finished_at, summary_status, summary_message, summary_progress,"
             # 排队位置：后台按 id 从小到大处理
             " CASE WHEN status='queued' THEN (SELECT count(*) FROM documents q WHERE q.status='queued' AND q.id <= documents.id)"
             " END AS queue_pos"
@@ -172,9 +172,12 @@ def document_summary(doc_id: int):
     """大模型生成的服务内容概述。status：null 未生成 / queued / running / done / failed。"""
     with db.session() as conn:
         doc = _doc_or_404(conn, doc_id)
+    # draft：生成中的概述（最后一步边生成边显示）；now：服务器时间，前端算"已用时间"用
     return {"doc_id": doc_id, "filename": doc["filename"], "doc_status": doc["status"], "llm": llm.enabled(),
             "status": doc["summary_status"], "summary": doc["summary"], "message": doc["summary_message"],
-            "summary_at": doc["summary_at"]}
+            "summary_at": doc["summary_at"], "progress": doc["summary_progress"],
+            "started_at": doc["summary_started_at"], "draft": doc["summary_draft"],
+            "now": time.strftime("%Y-%m-%d %H:%M:%S")}
 
 
 @app.post("/api/documents/summarize")

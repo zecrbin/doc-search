@@ -981,7 +981,8 @@ function summaryButton(d) {
   const st = d.summary_status;
   const cls = st === "failed" ? " danger" : st === "queued" || st === "running" ? " pending" : "";
   const title = st === "failed" ? d.summary_message || "" : st === "running" ? d.summary_message || "" : "";
-  return `<button class="btn small${cls}" data-summary="${d.id}" title="${esc(title)}">${SUMMARY_LABEL[st] || "生成概述"}</button>`;
+  const label = st === "running" ? `概述 ${Math.round((d.summary_progress || 0) * 100)}%` : SUMMARY_LABEL[st] || "生成概述";
+  return `<button class="btn small${cls}" data-summary="${d.id}" title="${esc(title)}">${label}</button>`;
 }
 
 // 极简 Markdown：标题、列表、加粗；先转义，不会注入 HTML
@@ -1008,7 +1009,13 @@ function renderMarkdown(md) {
   return out.join("");
 }
 
-const sumDlg = { docId: null, timer: null, text: "" };
+const sumDlg = { docId: null, timer: null, text: "", offset: 0 };
+
+// 概述生成中的"已用时间"每秒走一次（按服务器时钟）
+setInterval(() => {
+  const el = document.querySelector("#sumStatus [data-started]");
+  if (el) el.textContent = fmtDur(Date.now() + sumDlg.offset - parseTime(el.dataset.started));
+}, 1000);
 
 async function openSummary(docId) {
   sumDlg.docId = docId;
@@ -1030,6 +1037,7 @@ async function loadSummary() {
     return;
   }
   if (docId !== sumDlg.docId || !$("#summaryDlg").open) return;
+  sumDlg.offset = parseTime(r.now) - Date.now();
   $("#sumFile").textContent = r.filename;
   $("#sumFile").title = r.filename;
   const status = $("#sumStatus");
@@ -1042,7 +1050,10 @@ async function loadSummary() {
   } else if (r.status === "queued") {
     status.textContent = r.summary ? "文件已重新解析，正在排队重新生成（下面是上一次的概述）" : "排队中，前面的文件生成完就开始";
   } else if (r.status === "running") {
-    status.textContent = `正在生成：${r.message || ""}（长文档可能需要几分钟）`;
+    const pct = Math.round((r.progress || 0) * 100);
+    const elapsed = r.started_at ? fmtDur(Date.now() + sumDlg.offset - parseTime(r.started_at)) : "";
+    status.innerHTML = `<div class="sum-prog"><div class="bar"><i style="width:${pct}%"></i></div><b>${pct}%</b></div>
+      <div>${esc(r.message || "准备中")}${r.started_at ? ` · 已用 <span data-started="${esc(r.started_at)}">${elapsed}</span>` : ""}</div>`;
   } else if (r.status === "failed") {
     status.className = "sum-status bad";
     status.textContent = `生成失败：${r.message || "未知错误"}`;
@@ -1052,11 +1063,15 @@ async function loadSummary() {
     status.textContent = "还没有生成概述，点击下方“重新生成”开始";
   }
   sumDlg.text = r.summary || "";
-  $("#sumBody").innerHTML = r.summary ? renderMarkdown(r.summary) : "";
+  // 生成最后一步时，边生成边显示草稿
+  const drafting = r.status === "running" && r.draft;
+  $("#sumBody").classList.toggle("drafting", !!drafting);
+  $("#sumBody").innerHTML = drafting ? renderMarkdown(r.draft) : r.summary ? renderMarkdown(r.summary) : "";
+  if (drafting) $("#sumBody").scrollTop = $("#sumBody").scrollHeight;
   $("#sumRegen").hidden = !r.llm || r.doc_status !== "done";
   $("#sumRegen").disabled = busyNow;
   $("#sumCopy").disabled = !r.summary;
-  if (busyNow || r.doc_status !== "done") sumDlg.timer = setTimeout(loadSummary, 3000);
+  if (busyNow || r.doc_status !== "done") sumDlg.timer = setTimeout(loadSummary, r.status === "running" ? 1500 : 3000);
 }
 
 $("#sumClose").addEventListener("click", () => $("#summaryDlg").close());

@@ -27,7 +27,10 @@ CREATE TABLE IF NOT EXISTS documents(
   summary TEXT,          -- 大模型生成的服务内容概述（Markdown）
   summary_status TEXT,   -- NULL 未生成 / queued / running / done / failed
   summary_message TEXT,  -- 生成进度或失败原因
-  summary_at TEXT
+  summary_at TEXT,
+  summary_progress REAL,    -- 生成进度 0～1
+  summary_started_at TEXT,
+  summary_draft TEXT        -- 生成中的概述（边生成边显示）
 );
 CREATE TABLE IF NOT EXISTS chunks(
   id INTEGER PRIMARY KEY,
@@ -90,9 +93,11 @@ def init():
         conn.executescript(SCHEMA)
         # 旧库补列
         cols = {r[1] for r in conn.execute("PRAGMA table_info(documents)")}
-        for col in ("started_at", "finished_at", "summary", "summary_status", "summary_message", "summary_at"):
+        for col in ("started_at", "finished_at", "summary", "summary_status", "summary_message", "summary_at",
+                    "summary_progress", "summary_started_at", "summary_draft"):
             if col not in cols:
-                conn.execute(f"ALTER TABLE documents ADD COLUMN {col} TEXT")
+                typ = "REAL" if col == "summary_progress" else "TEXT"
+                conn.execute(f"ALTER TABLE documents ADD COLUMN {col} {typ}")
 
 
 def delete_chunks(conn: sqlite3.Connection, doc_id: int):

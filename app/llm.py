@@ -1,4 +1,5 @@
 """大模型客户端：OpenAI 兼容的 /chat/completions 接口。"""
+import json
 import logging
 import re
 import time
@@ -113,26 +114,31 @@ def clean(text: str) -> str:
     return text.strip()
 
 
-def chat(system: str, user: str, max_tokens: int | None = None, retries: int = 2) -> str:
+def chat(system: str, user: str, max_tokens: int | None = None, retries: int = 2, on_progress=None) -> str:
+    """on_progress(已输出字数, 已输出内容, 思考字数)：传了就用流式输出，边生成边回调（回调抛异常会中止生成）。"""
     payload = {
         "model": model(),
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "temperature": 0.2,
         "max_tokens": max_tokens or output_tokens(),
-        "stream": False,
+        "stream": on_progress is not None,
     }
     if config.LLM_NO_THINK:
         # vLLM / SGLang / llama.cpp 支持；不支持的服务会忽略，输出里的思考过程再由 clean() 去掉
         payload["chat_template_kwargs"] = {"enable_thinking": False}
     for attempt in range(retries + 1):
         try:
-            r = _http().post("/chat/completions", json=payload)
-            r.raise_for_status()
-            choice = r.json()["choices"][0]
-            text = clean(choice["message"].get("content") or "")
+            if on_progress:
+                raw, finish = _stream(payload, on_progress)
+            else:
+                r = _http().post("/chat/completions", json=payload)
+                r.raise_for_status()
+                choice = r.json()["choices"][0]
+                raw, finish = choice["message"].get("content") or "", choice.get("finish_reason")
+            text = clean(raw)
             if not text:
                 raise RuntimeError("大模型返回了空内容")
-            if choice.get("finish_reason") == "length":
+            if finish == "length":
                 log.warning("大模型输出被截断（max_tokens=%s）", payload["max_tokens"])
             return text
         except (httpx.TransportError, httpx.HTTPStatusError) as e:
@@ -144,6 +150,32 @@ def chat(system: str, user: str, max_tokens: int | None = None, retries: int = 2
                 raise RuntimeError(f"大模型调用失败：{detail}") from e
             time.sleep(3 * (attempt + 1))
     raise AssertionError("unreachable")
+
+
+def _stream(payload: dict, on_progress) -> tuple[str, str | None]:
+    """读 SSE 流（data: {...} 行，以 data: [DONE] 结束）。"""
+    parts: list[str] = []
+    chars = thinking = 0
+    finish = None
+    with _http().stream("POST", "/chat/completions", json=payload) as r:
+        if r.status_code >= 400:
+            r.read()
+            r.raise_for_status()
+        for line in r.iter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            choice = (json.loads(data).get("choices") or [{}])[0]
+            delta = choice.get("delta") or {}
+            if delta.get("content"):
+                parts.append(delta["content"])
+                chars += len(delta["content"])
+            thinking += len(delta.get("reasoning_content") or "")
+            finish = choice.get("finish_reason") or finish
+            on_progress(chars, "".join(parts), thinking)
+    return "".join(parts), finish
 
 
 def health() -> dict:

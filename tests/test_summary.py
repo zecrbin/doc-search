@@ -36,7 +36,16 @@ class FakeLLM:
         self.calls.append(user)
         if self.on_call:
             self.on_call()
-        return httpx.Response(200, json={"choices": [{"message": {"content": self.reply(user)}, "finish_reason": "stop"}]})
+        text = self.reply(user)
+        if not body.get("stream"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": text}, "finish_reason": "stop"}]})
+        # 流式：和 llama-server 一样按 SSE 逐段返回
+        pieces = [text[i:i + 5] for i in range(0, len(text), 5)]
+        lines = [json.dumps({"choices": [{"delta": {"content": p}, "finish_reason": None}]}, ensure_ascii=False)
+                 for p in pieces]
+        lines.append(json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}))
+        sse = "".join(f"data: {x}\n\n" for x in lines) + "data: [DONE]\n\n"
+        return httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
 
 
 @pytest.fixture
@@ -217,3 +226,33 @@ def test_unreachable_llm_gives_clear_message(tmp_path, monkeypatch):
     row = _row(doc["id"])
     assert row["summary_status"] == "failed" and "连不上大模型（http://127.0.0.1:1/v1）" in row["summary_message"]
     monkeypatch.setattr(llm, "_client", None)
+
+
+def test_progress_reported_while_streaming(fake, monkeypatch):
+    monkeypatch.setattr(config, "LLM_CHUNK_CHARS", 200)
+    fake.reply = lambda user: "- 要点" * 20 if "部分原文" in user else "## 概述\n" + "内容" * 40
+    frames = []
+    text = "\n".join(f"第{i}节：系统应支持态势感知，响应时间不超过{i}秒。" for i in range(40))
+    result = summary.summarize("标书.pdf", text, lambda msg, frac, draft=None: frames.append((msg, frac, draft)))
+    assert result.startswith("## 概述")
+    fracs = [f for _, f, _ in frames]
+    assert fracs == sorted(fracs) and 0 <= fracs[0] and fracs[-1] < 1  # 单调递增，完成前不到 100%
+    msgs = [m for m, _, _ in frames]
+    assert any("读取原文中" in m for m in msgs) and any("已输出" in m for m in msgs)
+    assert msgs[0].startswith("第 1/") and any("生成概述" in m for m in msgs)
+    drafts = [d for m, _, d in frames if d]
+    assert drafts and all("生成概述" in m for m, _, d in frames if d)  # 只有最后一步带草稿
+    assert len(drafts[-1]) > len(drafts[0])  # 草稿边生成边变长
+
+
+def test_thinking_stream_reported(monkeypatch):
+    chunks = [{"reasoning_content": "想" * 30}, {"content": "答案"}]
+    sse = "".join("data: " + json.dumps({"choices": [{"delta": d}]}, ensure_ascii=False) + "\n\n" for d in chunks)
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, text=sse + "data: [DONE]\n\n"))
+    monkeypatch.setattr(config, "LLM_URL", "http://llm:8000")
+    monkeypatch.setattr(config, "LLM_MODEL", "m")
+    monkeypatch.setattr(llm, "_client", httpx.Client(base_url=llm.base_url(), transport=transport))
+    monkeypatch.setattr(llm, "_ctx_checked", True)
+    seen = []
+    assert llm.chat("s", "u", on_progress=lambda c, t, th: seen.append((c, th))) == "答案"
+    assert seen == [(0, 30), (2, 30)]
