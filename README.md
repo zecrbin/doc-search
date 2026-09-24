@@ -1,6 +1,6 @@
 # 文档检索
 
-上传 PDF / Word，按原文精确检索，点击结果在原文中高亮关键字。
+上传 PDF / Word / 图片，按原文精确检索，点击结果在原文中高亮关键字。
 
 ## 启动
 
@@ -66,7 +66,7 @@ docker compose logs -f        # 看日志
 ## 处理流程
 
 ```
-上传 → doc/docx 用本机 Word 转 PDF（没有 Word 时用 LibreOffice）
+上传 → doc/docx 用本机 Word 转 PDF（没有 Word 时用 LibreOffice）；图片（jpg/png/bmp/tif/gif）直接转 PDF，多页 TIFF 每帧一页
      → 逐页判断：有文字层的页 PyMuPDF 本地提取；扫描页/乱码页送 MinerU OCR
      → 去页眉页脚、识别标题层级、按结构切块（表格单独成块）
      → SQLite：片段原文 + 页码和坐标

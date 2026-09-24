@@ -52,4 +52,6 @@ LLM_NO_THINK = _env("LLM_NO_THINK", "1") == "1"  # Qwen3 等思考模型关闭�
 CHUNK_TARGET = int(_env("CHUNK_TARGET", 500))
 CHUNK_MAX = int(_env("CHUNK_MAX", 800))
 
-ALLOWED_EXTS = {".pdf", ".doc", ".docx", ".rtf"}
+# 图片转成 PDF 后当扫描页走 OCR；多页 TIFF 转成多页，手机照片按 EXIF 方向转正（webp 不支持）
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".gif"}
+ALLOWED_EXTS = {".pdf", ".doc", ".docx", ".rtf"} | IMAGE_EXTS

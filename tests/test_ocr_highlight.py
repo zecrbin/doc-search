@@ -143,3 +143,33 @@ def test_progress_proportional_to_ocr_when_all_pages_scanned(tmp_path, mineru, m
     frames = []
     parser.parse_pdf(tmp_path / "four.pdf", lambda frac, msg: frames.append((round(frac, 3), msg)))
     assert [f for f, m in frames if m.startswith("OCR")] == [0.0, 0.25, 0.5, 0.75]
+
+
+def test_image_upload_is_ocrd_and_searchable(tmp_path, mineru):
+    """图片先转成 PDF，再当扫描页走 OCR：能检索、能预览、能定位关键字。"""
+    from app import search
+    src = pymupdf.open()
+    page = src.new_page(width=595, height=842)
+    page.insert_text((60, 100), LINE1, fontname="china-s", fontsize=12)
+    page.insert_text((60, 118), LINE2, fontname="china-s", fontsize=12)
+    png = tmp_path / "拍照.png"
+    page.get_pixmap(dpi=72).save(png)  # 72dpi：图片像素和页面坐标一一对应
+    doc = ingest.register_file(png, "拍照.png")
+    ingest.Worker()._step()
+    with db.session() as conn:
+        row = dict(conn.execute("SELECT * FROM documents WHERE id=?", (doc["id"],)).fetchone())
+    assert (row["status"], row["pages"], row["ocr_pages"]) == ("done", 1, 1), row["message"]
+    assert ingest.pdf_file(doc).exists() and ingest.orig_file(doc).exists()
+    assert search.search("城市")["total_hits"] == 1
+    client = TestClient(main.app)
+    assert client.get(f"/api/documents/{doc['id']}/pdf").headers["content-type"] == "application/pdf"
+    hl = client.get(f"/api/documents/{doc['id']}/highlights", params={"q": "城市"}).json()
+    assert [h["exact"] for h in hl["hits"]] == [True] and hl["ocr"]
+
+
+def test_unsupported_image_rejected(tmp_path):
+    import pytest
+    p = tmp_path / "a.webp"
+    p.write_bytes(b"RIFF0000WEBP")
+    with pytest.raises(ValueError, match="不支持的文件类型"):
+        ingest.register_file(p, "a.webp")

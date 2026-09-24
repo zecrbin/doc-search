@@ -7,7 +7,7 @@ const PDF_OPTS = {
   standardFontDataUrl: "/static/vendor/pdfjs/standard_fonts/",
 };
 const TOP_K = 200;
-const ACCEPT = [".pdf", ".doc", ".docx", ".rtf"];
+const ACCEPT = [".pdf", ".doc", ".docx", ".rtf", ".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".gif"];
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
