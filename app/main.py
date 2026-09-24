@@ -221,13 +221,24 @@ def document_highlights(doc_id: int, q: str = Query(..., min_length=1, max_lengt
             per_chunk = highlight.keyword_matches(doc["pdf_path"], [r for _, r in chunks], terms, ocr_lines)
         except Exception:
             log.exception("关键字定位失败 doc=%s", doc_id)
-    hits = []
+    # 一个文字块/表格被切成多段时，每段记录的位置都是整个块，各段会找到同样的命中：按位置去重，
+    # 再按阅读顺序分给真正包含它的段（每段最多分到它原文里出现的次数），左侧标出的段落才和右侧对得上
+    found: dict[tuple, dict] = {}
     for (cid, regions), matches in zip(chunks, per_chunk):
-        if matches:
-            hits += [{"chunk_id": cid, "boxes": m, "exact": True} for m in matches]
-        elif any(t in rows[cid]["text"].lower() for t in terms):  # 只靠文件名命中的词不用框
-            hits.append({"chunk_id": cid, "boxes": regions, "exact": False})
-    hits.sort(key=lambda h: (h["boxes"][0][0], h["boxes"][0][2], h["boxes"][0][1]))
+        if not matches:
+            if not any(t in rows[cid]["text"].lower() for t in terms):  # 只靠文件名命中的词不用框
+                continue
+            matches, exact = [regions], False
+        else:
+            exact = True
+        for m in matches:
+            found.setdefault(tuple(m[0]), {"boxes": m, "exact": exact, "candidates": []})["candidates"].append(cid)
+    quota = {cid: sum(rows[cid]["text"].lower().count(t) for t in terms) for cid, _ in chunks}
+    hits = []
+    for h in sorted(found.values(), key=lambda h: (h["boxes"][0][0], h["boxes"][0][2], h["boxes"][0][1])):
+        cid = next((c for c in h["candidates"] if quota[c] > 0), h["candidates"][0])
+        quota[cid] -= 1
+        hits.append({"chunk_id": cid, "boxes": h["boxes"], "exact": h["exact"]})
     # ocr：有关键字位置是按 OCR 行坐标估算的（扫描件）
     ocr = any(h["exact"] and int(h["boxes"][0][0]) in ocr_lines for h in hits)
     return {"doc_id": doc_id, "hits": hits, "ocr": ocr}
